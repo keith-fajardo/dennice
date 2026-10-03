@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+import json
+import os
 from pathlib import Path
 
 from PIL import Image as PILImage
@@ -11,14 +14,16 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Input, Static
+from textual.widgets import Button, Footer, Input, Select, Static, TextArea
 
 from dennice import __version__
 from dennice.benchmark.dataset import BenchmarkDataset
 from dennice.benchmark.runner import BenchmarkRunner
-from dennice.core.config import DenniceConfig, ProviderConfig, ReasoningEffort
+from dennice.core.config import DenniceConfig, PermissionMode, ProviderConfig, ReasoningEffort
 from dennice.core.harness import Harness
 from dennice.core.models import BenchmarkMode, EventKind, Task
+from dennice.core.process import command_for_platform
+from dennice.core.verification import verify_executor, verify_router
 
 
 TERMINAL_MASCOT_GRID = (
@@ -75,10 +80,35 @@ WORDMARK_GLYPHS = {
     "i": ("⭐", "  ", "█ ", "█ ", "██"),
     "c": ("    ", " ███", "█   ", "█   ", " ███"),
 }
+EXECUTOR_MODELS: dict[str, tuple[tuple[str, str], ...]] = {
+    # These are convenient, current defaults rather than an entitlement claim:
+    # users can always choose Custom for a model exposed by their local CLI.
+    "codex": (
+        ("Use Codex recommended default", "default"),
+        ("GPT-6.1 Sol", "gpt-6.1-sol"),
+        ("GPT-6 Luna", "gpt-6-luna"),
+        ("Astra", "gpt-6-astra"),
+        ("Custom model…", "custom"),
+    ),
+    "claude": (
+        ("Use Claude Code default", "default"),
+        ("Claude Sonnet", "sonnet"),
+        ("Claude Opus", "opus"),
+        ("Claude Haiku", "haiku"),
+        ("Custom model…", "custom"),
+    ),
+}
 SPINNER_FRAMES = ("◐", "◓", "◑", "◒")
 SLASH_COMMANDS = (
     ("/new", "start a fresh conversation"),
-    ("/setup", "choose provider, model, and effort"),
+    ("/setup", "choose provider, model, effort, and permissions"),
+    ("/config", "show executor, model, effort, and permissions"),
+    ("/model <name>", "set the executor model"),
+    ("/effort <level>", "set low, medium, high, xhigh, or default"),
+    ("/permissions <mode>", "set read-only, workspace-write, or plan"),
+    ("/session <number>", "switch to an open session tab"),
+    ("/sessions", "list open sessions"),
+    ("/rename <title>", "rename the current session"),
     ("/details", "show routing and event details"),
     ("/route <task>", "classify without execution"),
     ("/run <task>", "route and execute a task"),
@@ -94,19 +124,53 @@ class ChatMessage:
 
 
 @dataclass
+class ChatSession:
+    id: str
+    title: str
+    messages: list[ChatMessage]
+    input_history: list[str]
+
+
+@dataclass
 class SetupSelection:
     executor: ProviderConfig
     router: ProviderConfig
+    permission_mode: PermissionMode | None
     jev_api_key_env: str
     openjev_endpoint: str
     openjev_model: str
 
-class TaskInput(Input):
-    """Task composer that gives the slash menu first access to navigation keys."""
+class TaskComposer(TextArea):
+    """Multiline task composer; Ctrl+Enter submits and Enter inserts a newline."""
+
+    @property
+    def value(self) -> str:
+        """Match Input's small interface while retaining TextArea editing semantics."""
+        return self.text
+
+    @value.setter
+    def value(self, value: str) -> None:
+        self.load_text(value)
 
     def on_key(self, event: events.Key) -> None:
         app = self.app
-        if isinstance(app, DenniceApp) and app.handle_command_navigation(self, event):
+        if not isinstance(app, DenniceApp):
+            return
+        if event.key == "ctrl+a":
+            self.select_all()
+            event.prevent_default()
+            event.stop()
+        elif event.key == "ctrl+enter":
+            app.submit_composer(self)
+            event.prevent_default()
+            event.stop()
+        elif app.handle_command_navigation(self, event):
+            event.prevent_default()
+            event.stop()
+        elif event.key == "up" and self.cursor_at_first_line and app.recall_composer_history(self, -1):
+            event.prevent_default()
+            event.stop()
+        elif event.key == "down" and self.cursor_at_last_line and app.recall_composer_history(self, 1):
             event.prevent_default()
             event.stop()
 
@@ -198,21 +262,29 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
     SetupScreen { align: center middle; background: #000000aa; }
     #setup-dialog {
         width: 76;
-        height: auto;
+        max-height: 90%;
         padding: 1 2;
         border: tall #f03c95;
         background: #161616;
+        overflow-y: auto;
     }
     #setup-title { text-style: bold; color: #f3f3f3; }
     #setup-description { color: #b1b1b1; margin: 1 0; }
     #setup-provider, #setup-router { color: #ffd166; margin-top: 1; }
-    #setup-model, #setup-router-model, #setup-openjev-endpoint, #setup-openjev-model { margin-top: 1; }
-    #setup-buttons, #setup-router-buttons { height: 3; margin-top: 1; }
-    #setup-buttons Button, #setup-router-buttons Button { margin-right: 1; }
+    #setup-model-choice, #setup-model-custom, #setup-refresh-codex-models, #setup-router-model, #setup-openjev-endpoint, #setup-openjev-model { margin-top: 1; }
+    #setup-buttons, #setup-router-buttons { height: 2; margin-top: 1; }
+    #setup-buttons Button, #setup-router-buttons Button { width: 1fr; margin-right: 1; }
     #setup-model-label, #setup-effort-label, #setup-router-model-label, #setup-openjev-label, #setup-jev-label { color: #d8d8d8; margin-top: 1; }
-    #setup-effort-buttons { height: 3; }
-    #setup-effort-buttons Button { margin-right: 1; }
-    #setup-save { margin-top: 1; }
+    #setup-effort-buttons { height: 2; }
+    #setup-effort-buttons Button { width: 1fr; margin-right: 0; }
+    #setup-permission-label { color: #d8d8d8; margin-top: 1; }
+    #setup-permission-buttons { height: 2; }
+    #setup-permission-buttons Button { margin-right: 1; }
+    #setup-dialog Button { height: 2; min-height: 2; padding: 0 1; }
+    #setup-test { margin-top: 2; width: 34; }
+    #setup-test-result { color: #b8b8b8; margin-top: 1; }
+    #setup-save { margin-top: 2; width: 26; }
+    #setup-cancel { margin-top: 1; width: 26; }
     #setup-note { color: #8e8e8e; margin-top: 1; }
     """
 
@@ -222,9 +294,11 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
             config.executor.provider if config.executor.provider in {"mock", "codex", "claude"} else "mock"
         )
         self.executor_model = config.executor.model
+        self._codex_model_options = EXECUTOR_MODELS["codex"]
         self.reasoning_effort = (
             config.executor.reasoning_effort.value if config.executor.reasoning_effort else "default"
         )
+        self.permission_mode = config.executor.permission_mode
         self.router_provider = (
             config.router.provider if config.router.provider in {"rule", "codex", "jev", "openjev"} else "rule"
         )
@@ -237,33 +311,41 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
         with Vertical(id="setup-dialog"):
             yield Static("Dennice Setup", id="setup-title")
             yield Static(
-                "Choose the System 2 executor and System 1 cognitive router. Credentials stay outside Dennice.",
+                "System 2 executes; System 1 chooses cognitive policies. Credentials stay outside Dennice.",
                 id="setup-description",
             )
             yield Static("System 2 executor", id="setup-provider")
             with Horizontal(id="setup-buttons"):
-                yield Button("Mock · offline", id="setup-mock")
-                yield Button("Codex CLI · ChatGPT login", id="setup-codex")
-                yield Button("Claude Code · Claude login", id="setup-claude")
+                yield Button("Mock", id="setup-mock")
+                yield Button("Codex", id="setup-codex")
+                yield Button("Claude", id="setup-claude")
             yield Static("Executor model", id="setup-model-label")
-            yield Input(
-                value=self.executor_model,
-                placeholder="Model (for example: default)",
-                id="setup-model",
+            yield Select(
+                self._model_options(),
+                value=self._initial_model_choice(),
+                allow_blank=False,
+                id="setup-model-choice",
             )
-            yield Static("Reasoning effort", id="setup-effort-label")
+            yield Input(value=self._initial_custom_model(), placeholder="Custom model name", id="setup-model-custom")
+            yield Button("Refresh all available Codex models", id="setup-refresh-codex-models")
+            yield Static("Execution effort", id="setup-effort-label")
             with Horizontal(id="setup-effort-buttons"):
                 yield Button("Default", id="effort-default")
                 yield Button("Low", id="effort-low")
                 yield Button("Medium", id="effort-medium")
                 yield Button("High", id="effort-high")
                 yield Button("XHigh", id="effort-xhigh")
+            yield Static("Permission mode", id="setup-permission-label")
+            with Horizontal(id="setup-permission-buttons"):
+                yield Button("Read only", id="permission-read-only")
+                yield Button("Workspace write", id="permission-workspace-write")
+                yield Button("Plan", id="permission-plan")
             yield Static("System 1 cognitive router", id="setup-router")
             with Horizontal(id="setup-router-buttons"):
-                yield Button("Rule · offline", id="router-rule")
-                yield Button("Codex CLI", id="router-codex")
-                yield Button("Jev · hosted", id="router-jev")
-                yield Button("OpenJev · local", id="router-openjev")
+                yield Button("Rule", id="router-rule")
+                yield Button("Codex", id="router-codex")
+                yield Button("Jev", id="router-jev")
+                yield Button("OpenJev", id="router-openjev")
             yield Static("Codex router model", id="setup-router-model-label")
             yield Input(
                 value=self.router_model,
@@ -283,12 +365,10 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
                 placeholder="JEV_API_KEY",
                 id="setup-jev-api-key-env",
             )
+            yield Button("Test selected connections", id="setup-test")
+            yield Static("", id="setup-test-result")
             yield Button("Save configuration", variant="primary", id="setup-save")
             yield Button("Cancel", id="setup-cancel")
-            yield Static(
-                "Sign in separately with `codex login` or `claude`. Local OpenJev uses no Dennice API key.",
-                id="setup-note",
-            )
 
     def on_mount(self) -> None:
         self._show_selection()
@@ -299,51 +379,38 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
             self._show_selection()
         elif event.button.id == "setup-codex":
             self.executor_provider = "codex"
-            if self.query_one("#setup-model", Input).value in {"", "v1"}:
-                self.query_one("#setup-model", Input).value = "default"
+            if self.permission_mode not in {
+                PermissionMode.READ_ONLY,
+                PermissionMode.WORKSPACE_WRITE,
+            }:
+                self.permission_mode = PermissionMode.READ_ONLY
+            self.executor_model = "default"
+            self._refresh_model_choices()
             self._show_selection()
         elif event.button.id == "setup-claude":
             self.executor_provider = "claude"
-            if self.query_one("#setup-model", Input).value in {"", "v1"}:
-                self.query_one("#setup-model", Input).value = "default"
+            self.permission_mode = PermissionMode.PLAN
+            self.executor_model = "default"
+            self._refresh_model_choices()
             self._show_selection()
         elif event.button.id and event.button.id.startswith("router-"):
             self.router_provider = event.button.id.removeprefix("router-")
+            if self.router_provider == "codex" and self.router_model in {"", "v1"}:
+                self.router_model = "default"
+                self.query_one("#setup-router-model", Input).value = "default"
             self._show_selection()
         elif event.button.id and event.button.id.startswith("effort-"):
             self.reasoning_effort = event.button.id.removeprefix("effort-")
             self._show_selection()
+        elif event.button.id and event.button.id.startswith("permission-"):
+            self.permission_mode = PermissionMode(event.button.id.removeprefix("permission-"))
+            self._show_selection()
+        elif event.button.id == "setup-refresh-codex-models":
+            self._load_codex_model_catalog()
+        elif event.button.id == "setup-test":
+            self._test_selected_connections()
         elif event.button.id == "setup-save":
-            model = self.query_one("#setup-model", Input).value.strip() or "default"
-            effort = (
-                None
-                if self.reasoning_effort == "default"
-                else ReasoningEffort(self.reasoning_effort)
-            )
-            if self.executor_provider == "mock":
-                model, effort = "v1", None
-            env_name = self.query_one("#setup-jev-api-key-env", Input).value.strip() or "JEV_API_KEY"
-            router_model = self.query_one("#setup-router-model", Input).value.strip() or "default"
-            endpoint = (
-                self.query_one("#setup-openjev-endpoint", Input).value.strip()
-                or self.openjev_endpoint
-            )
-            openjev_model = self.query_one("#setup-openjev-model", Input).value.strip() or "openjev"
-            if self.router_provider == "rule":
-                router_model = "v1"
-            elif self.router_provider == "openjev":
-                router_model = openjev_model
-            self.dismiss(
-                SetupSelection(
-                    executor=ProviderConfig(
-                        provider=self.executor_provider, model=model, reasoning_effort=effort
-                    ),
-                    router=ProviderConfig(provider=self.router_provider, model=router_model),
-                    jev_api_key_env=env_name,
-                    openjev_endpoint=endpoint,
-                    openjev_model=openjev_model,
-                )
-            )
+            self.dismiss(self._selection_from_fields())
         elif event.button.id == "setup-cancel":
             self.dismiss(None)
 
@@ -354,23 +421,47 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
             "claude": "Claude Code (uses the current Claude subscription/login)",
         }
         label = executor_labels[self.executor_provider]
-        self.query_one("#setup-provider", Static).update(f"Selected executor: {label}")
+        self.query_one("#setup-provider", Static).update(f"System 2 executor: {label}")
         model_selected = self.executor_provider in {"codex", "claude"}
-        for widget_id in ("#setup-model-label", "#setup-model"):
+        for widget_id in ("#setup-model-label", "#setup-model-choice"):
             self.query_one(widget_id).display = model_selected
+        model_choice = str(self.query_one("#setup-model-choice", Select).value)
+        self.query_one("#setup-model-custom", Input).display = model_selected and model_choice == "custom"
+        self.query_one("#setup-refresh-codex-models", Button).display = self.executor_provider == "codex"
         for widget_id in ("#setup-effort-label", "#setup-effort-buttons"):
-            self.query_one(widget_id).display = self.executor_provider == "codex"
+            self.query_one(widget_id).display = model_selected
+        for widget_id in ("#setup-permission-label", "#setup-permission-buttons"):
+            self.query_one(widget_id).display = model_selected
         effort_label = "Default" if self.reasoning_effort == "default" else self.reasoning_effort.upper()
-        self.query_one("#setup-effort-label", Static).update(f"Reasoning effort: {effort_label}")
+        effort_note = (
+            "native Codex setting"
+            if self.executor_provider == "codex"
+            else "Dennice prompt guidance; Claude Code has no standard CLI effort flag"
+        )
+        self.query_one("#setup-effort-label", Static).update(
+            f"Execution effort: {effort_label} ({effort_note})"
+        )
+        self._set_button_selection(
+            {
+                "setup-mock": self.executor_provider == "mock",
+                "setup-codex": self.executor_provider == "codex",
+                "setup-claude": self.executor_provider == "claude",
+                "router-rule": self.router_provider == "rule",
+                "router-codex": self.router_provider == "codex",
+                "router-jev": self.router_provider == "jev",
+                "router-openjev": self.router_provider == "openjev",
+                "permission-read-only": self.permission_mode == PermissionMode.READ_ONLY,
+                "permission-workspace-write": self.permission_mode == PermissionMode.WORKSPACE_WRITE,
+                "permission-plan": self.permission_mode == PermissionMode.PLAN,
+            }
+        )
         router_labels = {
             "rule": "Rule router (deterministic and offline)",
             "codex": "Codex router (System 1 only; does not solve the task)",
             "jev": "Hosted Jev router (System 1; reads its key from the environment)",
             "openjev": "OpenJev-compatible local router (typed System 1 decisions)",
         }
-        self.query_one("#setup-router", Static).update(
-            f"Selected router: {router_labels[self.router_provider]}"
-        )
+        self.query_one("#setup-router", Static).update(f"System 1 router: {router_labels[self.router_provider]}")
         for widget_id in ("#setup-router-model-label", "#setup-router-model"):
             self.query_one(widget_id).display = self.router_provider == "codex"
         for widget_id in (
@@ -379,6 +470,280 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
             "#setup-openjev-model",
         ):
             self.query_one(widget_id).display = self.router_provider == "openjev"
+        for widget_id in ("#setup-jev-label", "#setup-jev-api-key-env"):
+            self.query_one(widget_id).display = self.router_provider == "jev"
+
+        permission_label = (
+            "Plan (Claude Code safe planning mode)"
+            if self.executor_provider == "claude"
+            else (self.permission_mode.value if self.permission_mode else "Read only")
+        )
+        self.query_one("#setup-permission-label", Static).update(
+            f"Permission mode: {permission_label}"
+        )
+        for button_id, mode in (
+            ("#permission-read-only", PermissionMode.READ_ONLY),
+            ("#permission-workspace-write", PermissionMode.WORKSPACE_WRITE),
+            ("#permission-plan", PermissionMode.PLAN),
+        ):
+            self.query_one(button_id, Button).display = (
+                (self.executor_provider == "codex" and mode != PermissionMode.PLAN)
+                or (self.executor_provider == "claude" and mode == PermissionMode.PLAN)
+            )
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id != "setup-model-choice":
+            return
+        if str(event.value) != "custom":
+            self.executor_model = str(event.value)
+        self._show_selection()
+
+    def _model_options(self) -> tuple[tuple[str, str], ...]:
+        if self.executor_provider == "codex":
+            return self._codex_model_options
+        return EXECUTOR_MODELS.get(self.executor_provider, (("Use default", "default"),))
+
+    def _selection_from_fields(self) -> SetupSelection:
+        model_choice = str(self.query_one("#setup-model-choice", Select).value)
+        custom_model = self.query_one("#setup-model-custom", Input).value.strip()
+        model = custom_model if model_choice == "custom" else model_choice
+        model = model or "default"
+        effort = None if self.reasoning_effort == "default" else ReasoningEffort(self.reasoning_effort)
+        if self.executor_provider == "mock":
+            model, effort, permission_mode = "v1", None, None
+        else:
+            permission_mode = self.permission_mode
+        env_name = self.query_one("#setup-jev-api-key-env", Input).value.strip() or "JEV_API_KEY"
+        router_model = self.query_one("#setup-router-model", Input).value.strip() or "default"
+        endpoint = self.query_one("#setup-openjev-endpoint", Input).value.strip() or self.openjev_endpoint
+        openjev_model = self.query_one("#setup-openjev-model", Input).value.strip() or "openjev"
+        if self.router_provider == "rule":
+            router_model = "v1"
+        elif self.router_provider == "openjev":
+            router_model = openjev_model
+        return SetupSelection(
+            executor=ProviderConfig(
+                provider=self.executor_provider,
+                model=model,
+                reasoning_effort=effort,
+                permission_mode=permission_mode,
+            ),
+            router=ProviderConfig(provider=self.router_provider, model=router_model),
+            permission_mode=permission_mode,
+            jev_api_key_env=env_name,
+            openjev_endpoint=endpoint,
+            openjev_model=openjev_model,
+        )
+
+    @work(exclusive=True)
+    async def _test_selected_connections(self) -> None:
+        """Test current Setup choices without persisting or modifying the project."""
+        button = self.query_one("#setup-test", Button)
+        result = self.query_one("#setup-test-result", Static)
+        button.disabled = True
+        button.label = "Testing connections…"
+        result.update("Checking System 1 and System 2 with the selections above…")
+        selection = self._selection_from_fields()
+        config = self.app.harness.config.model_copy(deep=True)  # type: ignore[attr-defined]
+        config.executor = selection.executor
+        config.router = selection.router
+        config.jev.api_key_env = selection.jev_api_key_env
+        config.openjev.endpoint = selection.openjev_endpoint
+        config.openjev.model = selection.openjev_model
+        router_check, executor_check = await asyncio.gather(verify_router(config), verify_executor(config))
+        lines = []
+        for check in (router_check, executor_check):
+            marker = "✓" if check.ok else "✗"
+            lines.append(f"{marker} {check.component}: {check.detail}")
+        result.update("\n".join(lines))
+        button.disabled = False
+        button.label = "Test selected connections"
+
+    def _initial_model_choice(self) -> str:
+        if self.executor_provider not in EXECUTOR_MODELS:
+            return "default"
+        values = {value for _, value in self._model_options()}
+        return self.executor_model if self.executor_model in values else "custom"
+
+    def _initial_custom_model(self) -> str:
+        return "" if self._initial_model_choice() != "custom" else self.executor_model
+
+    def _refresh_model_choices(self) -> None:
+        selector = self.query_one("#setup-model-choice", Select)
+        selector.set_options(self._model_options())
+        selector.value = self._initial_model_choice()
+        self.query_one("#setup-model-custom", Input).value = self._initial_custom_model()
+
+    @work(exclusive=True)
+    async def _load_codex_model_catalog(self) -> None:
+        """Ask the installed, signed-in Codex CLI which models it can expose."""
+        button = self.query_one("#setup-refresh-codex-models", Button)
+        button.disabled = True
+        button.label = "Loading Codex model catalog…"
+        command = command_for_platform(
+            ["codex", "debug", "models"], "win32" if os.name == "nt" else "posix"
+        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=20)
+            if process.returncode != 0:
+                raise RuntimeError(stderr.decode("utf-8", errors="replace").strip() or "Codex returned an error")
+            payload = json.loads(stdout.decode("utf-8"))
+            models = payload.get("models", [])
+            options = [
+                (str(model.get("display_name") or model["slug"]), str(model["slug"]))
+                for model in models
+                if model.get("slug") and model.get("visibility", "list") == "list"
+            ]
+            if not options:
+                raise RuntimeError("The installed Codex CLI returned no selectable models.")
+            options.sort(key=lambda option: option[0].lower())
+            self._codex_model_options = tuple(
+                [("Use Codex recommended default", "default"), *options, ("Custom model…", "custom")]
+            )
+            self._refresh_model_choices()
+            self.notify(f"Loaded {len(options)} Codex models from the installed CLI.")
+        except (FileNotFoundError, OSError, TimeoutError, json.JSONDecodeError, RuntimeError) as error:
+            self.notify(f"Could not load Codex models: {error}", severity="warning")
+        finally:
+            button.disabled = False
+            button.label = "Refresh all available Codex models"
+
+    def _set_button_selection(self, selected: dict[str, bool]) -> None:
+        """Give the selected provider an explicit marker, independent of keyboard focus."""
+        labels = {
+            "setup-mock": "Mock",
+            "setup-codex": "Codex",
+            "setup-claude": "Claude",
+            "router-rule": "Rule",
+            "router-codex": "Codex",
+            "router-jev": "Jev",
+            "router-openjev": "OpenJev",
+            "permission-read-only": "Read only",
+            "permission-workspace-write": "Workspace write",
+            "permission-plan": "Plan",
+        }
+        for button_id, is_selected in selected.items():
+            button = self.query_one(f"#{button_id}", Button)
+            button.label = ("✓ " if is_selected else "") + labels[button_id]
+            button.variant = "success" if is_selected else "default"
+
+
+class ModelPickerScreen(ModalScreen[str | None]):
+    """Small, keyboard-friendly model picker for the `/model` command."""
+
+    CSS = """
+    ModelPickerScreen { align: center middle; background: #000000aa; }
+    #model-picker { width: 58; padding: 1 2; border: tall #f03c95; background: #161616; }
+    #model-picker-title { color: #f3f3f3; text-style: bold; }
+    #model-picker-note { color: #aaa; margin: 1 0; }
+    #model-picker-select, #model-picker Button { width: 1fr; margin-top: 1; }
+    #model-picker-custom { margin-top: 1; }
+    """
+
+    def __init__(self, provider: str, current_model: str) -> None:
+        super().__init__()
+        self.provider = provider
+        self.current_model = current_model
+        self._options = EXECUTOR_MODELS[provider]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="model-picker"):
+            yield Static(f"Choose {self.provider.title()} model", id="model-picker-title")
+            yield Static(
+                "Availability depends on the account signed in to the provider CLI.",
+                id="model-picker-note",
+            )
+            yield Select(
+                self._options,
+                value=self._initial_choice(),
+                allow_blank=False,
+                id="model-picker-select",
+            )
+            yield Input(value=self._initial_custom(), placeholder="Custom model name", id="model-picker-custom")
+            yield Button("Refresh all available Codex models", id="model-picker-refresh")
+            yield Button("Use selected model", id="model-picker-save")
+            yield Button("Cancel", id="model-cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#model-picker-refresh", Button).display = self.provider == "codex"
+        self._show_custom_input()
+
+    def _initial_choice(self) -> str:
+        values = {value for _, value in self._options}
+        return self.current_model if self.current_model in values else "custom"
+
+    def _initial_custom(self) -> str:
+        return "" if self._initial_choice() != "custom" else self.current_model
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "model-picker-select":
+            self._show_custom_input()
+
+    def _show_custom_input(self) -> None:
+        choice = str(self.query_one("#model-picker-select", Select).value)
+        self.query_one("#model-picker-custom", Input).display = choice == "custom"
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        if button_id == "model-picker-save":
+            choice = str(self.query_one("#model-picker-select", Select).value)
+            custom = self.query_one("#model-picker-custom", Input).value.strip()
+            if choice != "custom":
+                self.dismiss(choice)
+            elif custom:
+                self.dismiss(custom)
+            else:
+                self.notify("Enter a custom model name first.", severity="warning")
+        elif button_id == "model-picker-refresh":
+            self._load_codex_model_catalog()
+        elif button_id == "model-cancel":
+            self.dismiss(None)
+
+    @work(exclusive=True)
+    async def _load_codex_model_catalog(self) -> None:
+        button = self.query_one("#model-picker-refresh", Button)
+        button.disabled = True
+        button.label = "Loading Codex model catalog…"
+        command = command_for_platform(
+            ["codex", "debug", "models"], "win32" if os.name == "nt" else "posix"
+        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=20)
+            if process.returncode != 0:
+                raise RuntimeError(stderr.decode("utf-8", errors="replace").strip() or "Codex returned an error")
+            payload = json.loads(stdout.decode("utf-8"))
+            models = payload.get("models", [])
+            options = [
+                (str(model.get("display_name") or model["slug"]), str(model["slug"]))
+                for model in models
+                if model.get("slug") and model.get("visibility", "list") == "list"
+            ]
+            if not options:
+                raise RuntimeError("The installed Codex CLI returned no selectable models.")
+            options.sort(key=lambda option: option[0].lower())
+            self._options = tuple(
+                [("Use Codex recommended default", "default"), *options, ("Custom model…", "custom")]
+            )
+            selector = self.query_one("#model-picker-select", Select)
+            selector.set_options(self._options)
+            selector.value = self._initial_choice()
+            self._show_custom_input()
+            self.notify(f"Loaded {len(options)} Codex models from the installed CLI.")
+        except (FileNotFoundError, OSError, TimeoutError, json.JSONDecodeError, RuntimeError) as error:
+            self.notify(f"Could not load Codex models: {error}", severity="warning")
+        finally:
+            button.disabled = False
+            button.label = "Refresh all available Codex models"
 
 
 class DenniceApp(App[None]):
@@ -386,7 +751,7 @@ class DenniceApp(App[None]):
 
     TITLE = "Dennice"
     BINDINGS = [
-        ("n", "new_task", "New task"),
+        Binding("ctrl+n", "new_session", "New session", priority=True),
         ("r", "run_task", "Run task"),
         ("c", "classify_task", "Classify"),
         ("b", "run_benchmark", "Benchmark"),
@@ -444,7 +809,7 @@ class DenniceApp(App[None]):
     }
     #home-task {
         width: 1fr;
-        height: 4;
+        height: 5;
         padding: 0 1;
         background: #202020;
         color: #e7e7e7;
@@ -452,6 +817,18 @@ class DenniceApp(App[None]):
         border-top: none;
         border-right: none;
         border-bottom: none;
+    }
+    #home-task.terminal-mode {
+        border-left: heavy #ffd166;
+        border-top: solid #ffd166;
+        border-right: solid #ffd166;
+        border-bottom: solid #ffd166;
+    }
+    #workspace-task.terminal-mode { border: tall #ffd166; }
+    .terminal-mode-label {
+        display: none;
+        color: #d8aa45;
+        margin: 0 1;
     }
     #home-modes { color: #a8a8a8; margin: 1 1 0 1; }
     #home-help { color: #767676; margin-top: 1; }
@@ -465,9 +842,43 @@ class DenniceApp(App[None]):
         background: #171116;
     }
     #workspace { height: 1fr; display: none; }
+    #session-tabs {
+        height: 2;
+        padding: 0 2;
+        background: #111111;
+        border-bottom: solid #353535;
+        align: left middle;
+    }
+    #session-tabs Button {
+        width: auto;
+        height: 1;
+        min-width: 0;
+        max-width: 22;
+        border: none;
+        background: #111111;
+        color: #b8b8b8;
+    }
+    #session-tabs .session-tab {
+        padding: 0 1;
+        margin-right: 0;
+    }
+    #session-tabs .session-tab.-primary {
+        background: #253656;
+        color: #f2f6ff;
+    }
+    #session-tabs .session-close {
+        width: 3;
+        padding: 0;
+        margin-right: 1;
+        color: #888888;
+    }
+    #session-tabs .session-close:hover {
+        background: #4b1e2f;
+        color: #fff3fa;
+    }
     #workspace-main { height: 1fr; }
     #details { display: none; width: 38; height: 1fr; }
-    #workspace-task { margin: 1 2; border: tall $accent; }
+    #workspace-task { height: 5; margin: 1 2; border: tall $accent; }
     #agent { width: 1fr; height: 1fr; }
     #output {
         height: 1fr;
@@ -498,9 +909,21 @@ class DenniceApp(App[None]):
         self.harness = Harness.from_config()
         self._activity_frame = 0
         self._run_is_active = False
-        self._conversation: list[ChatMessage] = []
+        self._sessions: list[ChatSession] = []
+        self._active_session_index: int | None = None
         self._command_matches: list[tuple[str, str]] = []
         self._command_selection = 0
+        self._history_cursor: int | None = None
+        self._history_draft = ""
+
+    @property
+    def _conversation(self) -> list[ChatMessage]:
+        """Compatibility view of the active session transcript."""
+        return self._ensure_active_session().messages
+
+    @_conversation.setter
+    def _conversation(self, messages: list[ChatMessage]) -> None:
+        self._ensure_active_session().messages = messages
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="masthead"):
@@ -511,20 +934,25 @@ class DenniceApp(App[None]):
                 with Horizontal(id="home-brand"):
                     yield self._mascot_widget("home-mascot", width=12, height=5)
                     yield Static(_wordmark_renderable(), id="home-title")
-                yield TaskInput(
-                    placeholder='Ask anything…  "Investigate a Snowflake cost increase"',
+                yield TaskComposer(
+                    placeholder='Ask anything…  Ctrl+Enter runs · ! pwd runs a terminal command',
                     id="home-task",
                 )
+                yield Static("", id="home-terminal-mode", classes="terminal-mode-label")
                 yield Static("", id="home-command-menu", classes="command-menu")
                 yield Static(
                     "Run  ·  Route  ·  Benchmark  ·  Setup",
                     id="home-modes",
                 )
                 yield Static(
-                    "enter run   /help commands   ctrl+s setup   n new task   q quit",
+                    "ctrl+enter run   enter newline   ! command terminal   /help commands   ctrl+n new session",
                     id="home-help",
                 )
         with Vertical(id="workspace"):
+            with Horizontal(id="session-tabs"):
+                for index in range(8):
+                    yield Button("", id=f"session-tab-{index}", classes="session-tab", compact=True)
+                    yield Button("×", id=f"session-close-{index}", classes="session-close", compact=True)
             with Horizontal(id="workspace-main"):
                 with Vertical(id="details"):
                     with Vertical(classes="detail-panel"):
@@ -533,41 +961,107 @@ class DenniceApp(App[None]):
                         yield Static("Tools / events\nAwaiting task.", id="events")
                 with Vertical(id="agent"):
                     yield Static("", id="output")
-            yield TaskInput(
-                placeholder="Describe the next task…  /help for commands",
+            yield TaskComposer(
+                placeholder="Describe the next task…  Ctrl+Enter runs · ! command opens terminal mode",
                 id="workspace-task",
             )
+            yield Static("", id="workspace-terminal-mode", classes="terminal-mode-label")
             yield Static("", id="workspace-command-menu", classes="command-menu")
         yield Static(self._status_text(), id="statusline")
         yield Footer(id="footer")
 
     def on_mount(self) -> None:
-        self.query_one("#home-task", Input).focus()
+        self.query_one("#home-task", TaskComposer).focus()
         self.set_interval(0.12, self._animate_activity)
+        self._render_session_tabs()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        value = event.value.strip()
+    def submit_composer(self, composer: TaskComposer) -> None:
+        """Submit a multiline composer explicitly; Enter itself remains a newline."""
+        value = composer.value.strip()
+        if not value:
+            return
+        session = self._ensure_active_session()
+        if not session.input_history or session.input_history[-1] != value:
+            session.input_history.append(value)
+        self._history_cursor = None
+        self._history_draft = ""
         if value.startswith("/"):
             self._run_slash_command(value)
+        elif value.startswith("!"):
+            self._start_terminal_command(value[1:].strip())
         else:
             self._start_run(value)
-        event.input.value = ""
+        composer.value = ""
+
+    def recall_composer_history(self, composer: TaskComposer, direction: int) -> bool:
+        """Recall submitted task, slash, or terminal commands at composer edges."""
+        history = self._ensure_active_session().input_history
+        if not history:
+            return False
+        if direction < 0:
+            if self._history_cursor is None:
+                self._history_draft = composer.value
+                self._history_cursor = len(history) - 1
+            else:
+                self._history_cursor = max(0, self._history_cursor - 1)
+            composer.value = history[self._history_cursor]
+            composer.action_cursor_line_end()
+            return True
+        if self._history_cursor is None:
+            return False
+        if self._history_cursor < len(history) - 1:
+            self._history_cursor += 1
+            composer.value = history[self._history_cursor]
+        else:
+            composer.value = self._history_draft
+            self._history_cursor = None
+        composer.action_cursor_line_end()
+        return True
 
     def on_input_changed(self, event: Input.Changed) -> None:
         menu_id = "#home-command-menu" if event.input.id == "home-task" else "#workspace-command-menu"
         self._show_command_menu(menu_id, event.value)
 
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        menu_id = "#home-command-menu" if event.text_area.id == "home-task" else "#workspace-command-menu"
+        self._show_command_menu(menu_id, event.text_area.text)
+        self._update_terminal_mode(event.text_area)
+
+    def _update_terminal_mode(self, composer: TextArea) -> None:
+        is_terminal = composer.text.lstrip().startswith("!")
+        composer.set_class(is_terminal, "terminal-mode")
+        label_id = "#home-terminal-mode" if composer.id == "home-task" else "#workspace-terminal-mode"
+        label = self.query_one(label_id, Static)
+        label.display = is_terminal
+        if is_terminal:
+            label.update(Text("!  ", style="bold #ffd166") + Text("Terminal mode · Ctrl+Enter executes in this project", style="#b7a36e"))
+
     def action_run_task(self) -> None:
         self._start_run(self._active_task_input().value)
 
-    def action_new_task(self) -> None:
-        self._conversation.clear()
+    def action_new_session(self) -> None:
+        session_number = len(self._sessions) + 1
+        self._sessions.append(
+            ChatSession(
+                id=f"session-{session_number}",
+                title=f"Session {session_number}",
+                messages=[],
+                input_history=[],
+            )
+        )
+        self._active_session_index = len(self._sessions) - 1
+        self._history_cursor = None
+        self._history_draft = ""
         self._run_is_active = False
-        self.query_one("#workspace", Vertical).display = False
-        self.query_one("#home", Vertical).display = True
-        task = self.query_one("#home-task", Input)
+        self._activate_workspace("")
+        self._render_session_tabs()
+        task = self.query_one("#workspace-task", TaskComposer)
         task.value = ""
         task.focus()
+
+    def action_new_task(self) -> None:
+        """Compatibility action for the original keybinding and slash command."""
+        self.action_new_session()
 
     def action_classify_task(self) -> None:
         task = self._active_task_input().value
@@ -600,7 +1094,10 @@ class DenniceApp(App[None]):
         config.save()
         self.harness = Harness(config)
         self.query_one("#masthead-copy", Static).update(self._masthead_text())
-        self.notify(f"Saved executor: {selection.executor.provider}; router: {selection.router.provider}")
+        self.notify(
+            f"Saved {selection.executor.provider}/{selection.executor.model}; "
+            f"router: {selection.router.provider}"
+        )
 
     def action_toggle_details(self) -> None:
         if not self.query_one("#workspace", Vertical).display:
@@ -615,9 +1112,26 @@ class DenniceApp(App[None]):
         if command in {"help", "commands"}:
             self._show_command_help()
         elif command == "new":
-            self.action_new_task()
+            self.action_new_session()
+        elif command == "session":
+            self._select_session_from_command(argument)
+        elif command == "sessions":
+            self._list_sessions()
+        elif command == "rename":
+            self._rename_current_session(argument)
         elif command == "setup":
             self.action_setup()
+        elif command == "config":
+            self._show_session_config()
+        elif command == "model":
+            if argument:
+                self._set_executor_model(argument)
+            else:
+                self._open_model_picker()
+        elif command == "effort":
+            self._set_executor_effort(argument)
+        elif command in {"permission", "permissions"}:
+            self._set_permission_mode(argument)
         elif command == "details":
             self._activate_workspace("")
             details = self.query_one("#details", Vertical)
@@ -641,6 +1155,129 @@ class DenniceApp(App[None]):
     def _show_command_help(self) -> None:
         commands = "\n".join(f"{command} — {description}" for command, description in SLASH_COMMANDS)
         self._show_local_message("Commands\n\n" + commands)
+
+    def _select_session_from_command(self, value: str) -> None:
+        try:
+            session_number = int(value)
+        except ValueError:
+            self._show_local_message("Usage: /session <number>")
+            return
+        index = session_number - 1
+        if not 0 <= index < len(self._sessions):
+            self._show_local_message(f"No open session {session_number}.")
+            return
+        self._select_session(index)
+
+    def _list_sessions(self) -> None:
+        if not self._sessions:
+            self._show_local_message("No sessions are open. Use /new to start one.")
+            return
+        sessions = []
+        for index, session in enumerate(self._sessions, start=1):
+            active = " (current)" if index - 1 == self._active_session_index else ""
+            sessions.append(f"{index}. {session.title}{active}")
+        self._show_local_message("Open sessions\n\n" + "\n".join(sessions) + "\n\nUse /session <number> to switch.")
+
+    def _rename_current_session(self, title: str) -> None:
+        normalized = " ".join(title.split())
+        if not normalized:
+            self._show_local_message("Usage: /rename <title>")
+            return
+        session = self._ensure_active_session()
+        session.title = normalized[:24] + ("…" if len(normalized) > 24 else "")
+        self._render_session_tabs()
+        self.notify(f"Renamed session to {session.title}")
+
+    def _show_session_config(self) -> None:
+        executor = self.harness.config.executor
+        effort = executor.reasoning_effort.value if executor.reasoning_effort else "default"
+        permission = self._effective_permission_mode().value
+        self._show_local_message(
+            "Session configuration\n\n"
+            f"Executor: {executor.provider}\n"
+            f"Model: {executor.model}\n"
+            f"Effort: {effort}\n"
+            f"Permissions: {permission}\n"
+            f"Router: {self.harness.config.router.provider}"
+        )
+
+    def _set_executor_model(self, value: str) -> None:
+        if not value:
+            self._show_local_message("Usage: /model <name>")
+            return
+        config = self.harness.config.model_copy(deep=True)
+        if config.executor.provider == "mock":
+            self._show_local_message("Select Codex or Claude in /setup before setting a model.")
+            return
+        config.executor.model = value
+        self._save_config(config, f"Model set to {value}")
+
+    def _open_model_picker(self) -> None:
+        executor = self.harness.config.executor
+        if executor.provider not in EXECUTOR_MODELS:
+            self._show_local_message("Select Codex or Claude in /setup before choosing a model.")
+            return
+        self.push_screen(
+            ModelPickerScreen(executor.provider, executor.model),
+            self._apply_model_picker,
+        )
+
+    def _apply_model_picker(self, model: str | None) -> None:
+        if model is not None:
+            self._set_executor_model(model)
+
+    def _set_executor_effort(self, value: str) -> None:
+        normalized = value.lower() or "default"
+        if normalized == "default":
+            effort = None
+        else:
+            try:
+                effort = ReasoningEffort(normalized)
+            except ValueError:
+                self._show_local_message("Usage: /effort <low|medium|high|xhigh|default>")
+                return
+        config = self.harness.config.model_copy(deep=True)
+        if config.executor.provider == "mock":
+            self._show_local_message("Select Codex or Claude in /setup before setting effort.")
+            return
+        config.executor.reasoning_effort = effort
+        self._save_config(config, f"Effort set to {normalized}")
+
+    def _set_permission_mode(self, value: str) -> None:
+        normalized = value.lower()
+        try:
+            permission = PermissionMode(normalized)
+        except ValueError:
+            self._show_local_message("Usage: /permissions <read-only|workspace-write|plan>")
+            return
+        config = self.harness.config.model_copy(deep=True)
+        if config.executor.provider == "mock":
+            self._show_local_message("Select Codex or Claude in /setup before setting permissions.")
+            return
+        if config.executor.provider == "claude" and permission != PermissionMode.PLAN:
+            self._show_local_message("Claude Code is currently run in safe plan mode. Use /permissions plan.")
+            return
+        if config.executor.provider == "codex" and permission == PermissionMode.PLAN:
+            self._show_local_message("Codex supports /permissions read-only or /permissions workspace-write.")
+            return
+        config.executor.permission_mode = permission
+        self._save_config(config, f"Permissions set to {permission.value}")
+
+    def _save_config(self, config: DenniceConfig, message: str) -> None:
+        config.save()
+        self.harness = Harness(config)
+        self.query_one("#masthead-copy", Static).update(self._masthead_text())
+        self.notify(message)
+
+    def _effective_permission_mode(self) -> PermissionMode:
+        configured = self.harness.config.executor.permission_mode
+        if configured is not None:
+            return configured
+        return (
+            PermissionMode.PLAN
+            if self.harness.config.executor.provider == "claude"
+            else PermissionMode.READ_ONLY
+        )
 
     def _show_command_menu(self, menu_id: str, value: str) -> None:
         menu = self.query_one(menu_id, Static)
@@ -701,38 +1338,170 @@ class DenniceApp(App[None]):
 
     def _show_local_message(self, message: str) -> None:
         self._activate_workspace("")
-        self._conversation.append(ChatMessage("assistant", message))
+        self._ensure_active_session().messages.append(ChatMessage("assistant", message))
         self._show_transcript()
 
     def _start_run(self, task: str) -> None:
         if task.strip():
+            config = self.harness.config
+            if config.router.provider == "jev" and not os.environ.get(config.jev.api_key_env):
+                self._show_local_message(
+                    "Hosted Jev cannot route this task because its API key is unavailable.\n\n"
+                    f"Export {config.jev.api_key_env} in this terminal, or open /setup and choose "
+                    "Rule, Codex, or OpenJev · local as the cognitive router."
+                )
+                return
+            session = self._ensure_active_session()
             history = [
                 {"role": message.role, "content": message.content}
-                for message in self._conversation
-                if message.content.strip()
+                for message in session.messages
+                if message.content.strip() and message.role in {"user", "assistant"}
             ]
             request = Task(
                 prompt=task,
                 context={"conversation_history": history} if history else {},
             )
             assistant_message = ChatMessage("assistant", "")
-            self._conversation.extend((ChatMessage("user", task), assistant_message))
+            session.messages.extend((ChatMessage("user", task), assistant_message))
+            if session.title.startswith("Session "):
+                session.title = self._session_title(task)
             self._activate_workspace(task)
+            self._render_session_tabs()
             self._run(request, assistant_message)
 
-    def _active_task_input(self) -> Input:
+    def _start_terminal_command(self, command: str) -> None:
+        """Run an explicit user terminal request in the project directory.
+
+        Unlike an agent tool call, a command prefixed by ``!`` is direct user
+        input. It is still kept out of model conversation history and clearly
+        labelled in the transcript.
+        """
+        if not command:
+            self._show_local_message("Usage: ! <bash command>\n\nExample: ! git status --short")
+            return
+        session = self._ensure_active_session()
+        terminal_message = ChatMessage("terminal", "Running terminal command…")
+        session.messages.extend((ChatMessage("user", f"! {command}"), terminal_message))
+        if session.title.startswith("Session "):
+            session.title = self._session_title(command)
+        self._activate_workspace("")
+        self._render_session_tabs()
+        self._run_terminal(command, terminal_message)
+
+    @work(exclusive=True)
+    async def _run_terminal(self, command: str, terminal_message: ChatMessage) -> None:
+        """Capture a bounded Bash command result without making it an agent tool."""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "bash",
+                "-lc",
+                command,
+                cwd=str(Path.cwd()),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+                terminal_message.content = (
+                    f"$ {command}\n\nCommand timed out after 30 seconds and was stopped."
+                )
+            else:
+                output = stdout.decode("utf-8", errors="replace")
+                error = stderr.decode("utf-8", errors="replace")
+                rendered = (output + (f"\n[stderr]\n{error}" if error else "")).strip()
+                if len(rendered) > 24_000:
+                    rendered = rendered[:24_000] + "\n\n[output truncated at 24 KB]"
+                if not rendered:
+                    rendered = "[no output]"
+                status = "completed" if process.returncode == 0 else f"failed (exit {process.returncode})"
+                terminal_message.content = f"$ {command}\n\n{rendered}\n\n[{status}]"
+        except FileNotFoundError:
+            terminal_message.content = (
+                "Terminal mode needs Bash on PATH. On Windows, install Git Bash or WSL and restart Dennice."
+            )
+        except OSError as error:
+            terminal_message.content = f"Terminal command could not start: {error}"
+        self._show_transcript()
+
+    def _active_task_input(self) -> TaskComposer:
         if self.query_one("#workspace", Vertical).display:
-            return self.query_one("#workspace-task", Input)
-        return self.query_one("#home-task", Input)
+            return self.query_one("#workspace-task", TaskComposer)
+        return self.query_one("#home-task", TaskComposer)
 
     def _activate_workspace(self, task: str) -> None:
         self.query_one("#home", Vertical).display = False
         self.query_one("#workspace", Vertical).display = True
         self.query_one("#masthead", Horizontal).display = True
         self.query_one("#footer", Footer).display = True
-        workspace_task = self.query_one("#workspace-task", Input)
+        workspace_task = self.query_one("#workspace-task", TaskComposer)
         workspace_task.value = task
         workspace_task.focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id and event.button.id.startswith("session-tab-"):
+            index = int(event.button.id.removeprefix("session-tab-"))
+            if index < len(self._sessions):
+                self._select_session(index)
+        elif event.button.id and event.button.id.startswith("session-close-"):
+            index = int(event.button.id.removeprefix("session-close-"))
+            if index < len(self._sessions):
+                self._close_session(index)
+
+    def _ensure_active_session(self) -> ChatSession:
+        if self._active_session_index is None:
+            self._sessions.append(
+                ChatSession(id="session-1", title="Session 1", messages=[], input_history=[])
+            )
+            self._active_session_index = 0
+            self._render_session_tabs()
+        return self._sessions[self._active_session_index]
+
+    def _select_session(self, index: int) -> None:
+        self._active_session_index = index
+        self._history_cursor = None
+        self._history_draft = ""
+        self._run_is_active = False
+        self._activate_workspace("")
+        self._render_session_tabs()
+        self._show_transcript()
+
+    def _close_session(self, index: int) -> None:
+        """Close one in-memory session and select its nearest surviving neighbour."""
+        closing = self._sessions.pop(index)
+        if not self._sessions:
+            self._active_session_index = None
+            self._activate_workspace("")
+            self._ensure_active_session()
+        elif self._active_session_index is None or self._active_session_index == index:
+            self._active_session_index = min(index, len(self._sessions) - 1)
+        elif self._active_session_index > index:
+            self._active_session_index -= 1
+        self._render_session_tabs()
+        self._show_transcript()
+        self.notify(f"Closed {closing.title}")
+
+    def _render_session_tabs(self) -> None:
+        for index in range(8):
+            button = self.query_one(f"#session-tab-{index}", Button)
+            close = self.query_one(f"#session-close-{index}", Button)
+            if index >= len(self._sessions):
+                button.display = False
+                close.display = False
+                continue
+            session = self._sessions[index]
+            active = index == self._active_session_index
+            button.display = True
+            close.display = True
+            button.label = f"{index + 1}  {session.title}"
+            button.variant = "primary" if active else "default"
+
+    @staticmethod
+    def _session_title(task: str) -> str:
+        normalized = " ".join(task.split())
+        return normalized[:24] + ("…" if len(normalized) > 24 else "")
 
     @work(exclusive=True)
     async def _classify(self, task: str) -> None:
@@ -785,9 +1554,15 @@ class DenniceApp(App[None]):
     def _show_transcript(self) -> None:
         executor_name = self.harness.executor.id.capitalize()
         transcript = Text()
-        for index, message in enumerate(self._conversation):
-            label_style = "bold #81aaff" if message.role == "user" else "bold #ff83c1"
-            label = "You" if message.role == "user" else "Dennice"
+        for index, message in enumerate(self._ensure_active_session().messages):
+            label_style = (
+                "bold #81aaff"
+                if message.role == "user"
+                else "bold #ffd166"
+                if message.role == "terminal"
+                else "bold #ff83c1"
+            )
+            label = "You" if message.role == "user" else "Terminal" if message.role == "terminal" else "Dennice"
             transcript.append(label + "\n", style=label_style)
             if message.role == "assistant" and not message.content and self._run_is_active:
                 transcript.append_text(_activity_renderable(executor_name, self._activity_frame))
@@ -816,10 +1591,16 @@ class DenniceApp(App[None]):
         self.query_one("#events", Static).update("Tools / events\nbenchmark completed")
 
     def _masthead_text(self) -> str:
+        executor = self.harness.config.executor
+        effort = executor.reasoning_effort.value if executor.reasoning_effort else "default"
         return (
             "Dennice\n"
             "Cognitive Data Agent Harness\n"
-            f"executor: {self.harness.executor.id}-{self.harness.executor.version}"
+            f"executor: {self.harness.executor.id}-{self.harness.executor.version}\n"
+            f"model: {executor.model}\n"
+            f"effort: {effort}\n"
+            f"permissions: {self._effective_permission_mode().value}\n"
+            f"router: {self.harness.config.router.provider}"
         )
 
     @staticmethod

@@ -2,12 +2,13 @@ import pytest
 from pydantic import ValidationError
 
 from dennice.cognition.taxonomy import CognitiveDemand
-from dennice.core.config import DenniceConfig, ProviderConfig, ReasoningEffort
+from dennice.core.config import DenniceConfig, PermissionMode, ProviderConfig, ReasoningEffort
 from dennice.core.models import CognitiveScore, ExecutionRequest, RoutingDecision, Task
 from dennice.executors.codex import CodexExecutor
 from dennice.executors.claude import ClaudeExecutor
 from dennice.executors.factory import executor_from_config
 from dennice.core.process import command_for_platform
+from dennice.routing.factory import router_from_config
 
 
 def test_confidence_is_bounded() -> None:
@@ -53,6 +54,13 @@ def test_codex_executor_is_read_only_and_uses_composed_prompt() -> None:
     assert executor_from_config(ProviderConfig(provider="codex", model="default")).id == "codex"
 
 
+def test_codex_workspace_write_permission_is_explicit() -> None:
+    executor = CodexExecutor(permission_mode=PermissionMode.WORKSPACE_WRITE)
+    request = ExecutionRequest(task=Task(prompt="Investigate warehouse cost."), system_instructions="Policy")
+    command = executor.command_for(request)
+    assert ["--sandbox", "workspace-write"] == command[3:5]
+
+
 def test_claude_executor_uses_local_subscription_cli_and_composed_prompt() -> None:
     executor = ClaudeExecutor(model="sonnet")
     request = ExecutionRequest(task=Task(prompt="Investigate warehouse cost."), system_instructions="Policy")
@@ -63,6 +71,17 @@ def test_claude_executor_uses_local_subscription_cli_and_composed_prompt() -> No
     assert ["--model", "sonnet"] == command[9:11]
     assert command[-1] == "Investigate warehouse cost."
     assert executor_from_config(ProviderConfig(provider="claude", model="default")).id == "claude"
+
+
+def test_claude_keeps_safe_plan_permission_and_applies_effort_as_prompt_guidance() -> None:
+    executor = ClaudeExecutor(
+        reasoning_effort=ReasoningEffort.HIGH,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+    )
+    request = ExecutionRequest(task=Task(prompt="Investigate warehouse cost."), system_instructions="Policy")
+    command = executor.command_for(request)
+    assert ["--permission-mode", "plan"] == command[5:7]
+    assert "Use high effort" in command[8]
 
 
 def test_claude_executor_extracts_only_assistant_text_events() -> None:
@@ -81,3 +100,8 @@ def test_windows_provider_commands_use_bash() -> None:
         "-lc",
         "codex exec 'hello world'",
     ]
+
+
+def test_codex_router_migrates_stale_rule_model_to_provider_default() -> None:
+    router = router_from_config(ProviderConfig(provider="codex", model="v1"))
+    assert router.model == "default"

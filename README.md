@@ -27,6 +27,31 @@ read-only sandbox; the Claude adapter uses Claude Code print mode with plan
 permissions. Both receive the prompt composed from the selected cognitive
 policies.
 
+Within the TUI, use `Ctrl+N` or `/new` to create a session. Open sessions stay
+available as workspace tabs; click a tab or use `/session <number>` to return to
+one. Use `×` to close an open tab, `/sessions` to list them, and
+`/rename <title>` to name the current session. `/config` prints the active
+executor, model, effort, permission mode, and router.
+
+The composer accepts multiple lines. Press `Ctrl+Enter` to submit, `Ctrl+A` to
+select the complete draft, and use Up/Down at the top or bottom of the composer
+to replay submitted tasks and slash commands. Prefix a direct local Bash command
+with `!`, for example `! git status --short`; Dennice labels its captured output
+as **Terminal** and keeps it out of agent conversation history.
+
+Use `/model` to select a System 2 model or type `/model <name>` for a direct
+override. Setup provides the same selector. The curated choices appear first;
+for Codex, **Refresh all available Codex models** loads the model catalog that
+your installed and signed-in Codex CLI exposes. That keeps model availability
+account-specific rather than claiming that every OpenAI API model is usable by a
+given ChatGPT subscription. In Setup, **Test selected connections** checks the
+unsaved System 1 router and System 2 executor choices and reports their
+provider-specific error without changing `dennice.yaml`.
+
+You can update the executor from the composer with `/effort
+<low|medium|high|xhigh|default>` and `/permissions
+<read-only|workspace-write|plan>`.
+
 For Codex, Setup also stores a model override and optional reasoning effort in
 your local `dennice.yaml`:
 

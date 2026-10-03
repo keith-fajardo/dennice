@@ -7,6 +7,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+from dennice.core.config import PermissionMode, ReasoningEffort
 from dennice.core.models import EventKind, ExecutionRequest, RunEvent
 from dennice.core.process import command_for_platform
 
@@ -22,8 +23,16 @@ class ClaudeExecutor:
     id = "claude"
     version = "cli-v1"
 
-    def __init__(self, model: str = "default", command: str = "claude") -> None:
+    def __init__(
+        self,
+        model: str = "default",
+        reasoning_effort: ReasoningEffort | None = None,
+        permission_mode: PermissionMode | None = None,
+        command: str = "claude",
+    ) -> None:
         self.model = model
+        self.reasoning_effort = reasoning_effort
+        self.permission_mode = permission_mode or PermissionMode.PLAN
         self.command = command
 
     def command_for(self, request: ExecutionRequest) -> list[str]:
@@ -34,14 +43,33 @@ class ClaudeExecutor:
             "stream-json",
             "--verbose",
             "--permission-mode",
-            "plan",
+            self._permission_mode(),
             "--append-system-prompt",
-            request.system_instructions,
+            self._system_instructions(request),
         ]
         if self.model not in {"", "default"}:
             command.extend(["--model", self.model])
         command.append(request.task.prompt)
         return command_for_platform(command)
+
+    def _permission_mode(self) -> str:
+        """Claude's supported non-interactive safe mode is plan.
+
+        The configuration remains visible even if an imported Codex setting was
+        read-only/workspace-write; Claude is deliberately kept in plan mode
+        until a provider-native writable flow is introduced.
+        """
+        return "plan"
+
+    def _system_instructions(self, request: ExecutionRequest) -> str:
+        if self.reasoning_effort is None:
+            return request.system_instructions
+        return (
+            f"{request.system_instructions}\n\n"
+            "DENNICE EXECUTION EFFORT\n"
+            f"Use {self.reasoning_effort.value} effort: scale evidence gathering, validation, "
+            "and decomposition to the task's risk and complexity."
+        )
 
     async def execute(self, run_id: str, request: ExecutionRequest) -> AsyncIterator[RunEvent]:
         try:

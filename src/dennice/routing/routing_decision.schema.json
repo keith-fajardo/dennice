@@ -60,6 +60,7 @@
     "task_family",
     "cognitive_demands",
     "primary_demand",
-    "supporting_demands"
+    "supporting_demands",
+    "rationale"
   ]
 }

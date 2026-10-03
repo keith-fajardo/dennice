@@ -7,7 +7,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from dennice.core.config import ReasoningEffort
+from dennice.core.config import PermissionMode, ReasoningEffort
 from dennice.core.models import EventKind, ExecutionRequest, RunEvent
 from dennice.core.process import command_for_platform
 
@@ -26,10 +26,12 @@ class CodexExecutor:
         self,
         model: str = "default",
         reasoning_effort: ReasoningEffort | None = None,
+        permission_mode: PermissionMode | None = None,
         command: str = "codex",
     ) -> None:
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.permission_mode = permission_mode or PermissionMode.READ_ONLY
         self.command = command
 
     def command_for(self, request: ExecutionRequest) -> list[str]:
@@ -39,7 +41,7 @@ class CodexExecutor:
             "exec",
             "--json",
             "--sandbox",
-            "read-only",
+            self._sandbox_mode(),
             "--ephemeral",
             "--skip-git-repo-check",
             "--color",
@@ -55,6 +57,11 @@ class CodexExecutor:
             f"{request.system_instructions}\n\nUSER TASK\n{request.task.prompt}"
         )
         return command_for_platform(command)
+
+    def _sandbox_mode(self) -> str:
+        if self.permission_mode == PermissionMode.WORKSPACE_WRITE:
+            return "workspace-write"
+        return "read-only"
 
     async def execute(self, run_id: str, request: ExecutionRequest) -> AsyncIterator[RunEvent]:
         try:

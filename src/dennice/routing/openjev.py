@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 from typing import Any
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from dennice.cognition.taxonomy import CognitiveDemand
@@ -41,6 +41,7 @@ class OpenJevRouter:
 
     id = "openjev"
     version = "systemone-v1"
+    service_name = "local OpenJev router"
 
     def __init__(self, endpoint: str, model: str = "openjev", timeout_seconds: float = 5.0) -> None:
         self.endpoint = endpoint
@@ -110,7 +111,7 @@ class OpenJevRouter:
             cognitive_demands=scores,
             primary_demand=primary,
             supporting_demands=[demand for demand, _ in selected_supports],
-            rationale="Local OpenJev typed decision scores; no task solution was generated.",
+            rationale=f"{self.service_name.title()} typed decision scores; no task solution was generated.",
             router_id=self.id,
             router_version=self.version,
         )
@@ -125,8 +126,12 @@ class OpenJevRouter:
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310 - configured local endpoint.
                 body = json.loads(response.read())
+        except HTTPError as exc:
+            raise RuntimeError(
+                f"{self.service_name.title()} rejected the request with HTTP {exc.code} at {self.endpoint}."
+            ) from exc
         except URLError as exc:
-            raise RuntimeError(f"Could not reach local OpenJev router at {self.endpoint}.") from exc
+            raise RuntimeError(f"Could not reach {self.service_name} at {self.endpoint}.") from exc
         return body if isinstance(body, dict) else {}
 
     def _headers(self) -> dict[str, str]:
@@ -162,6 +167,7 @@ class JevRouter(OpenJevRouter):
 
     id = "jev"
     version = "http-v1"
+    service_name = "hosted Jev router"
 
     def __init__(
         self,

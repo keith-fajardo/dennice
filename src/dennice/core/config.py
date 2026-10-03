@@ -14,10 +14,19 @@ class ReasoningEffort(str, Enum):
     XHIGH = "xhigh"
 
 
+class PermissionMode(str, Enum):
+    """Explicit execution authority; adapters map only supported values."""
+
+    READ_ONLY = "read-only"
+    WORKSPACE_WRITE = "workspace-write"
+    PLAN = "plan"
+
+
 class ProviderConfig(BaseModel):
     provider: str
     model: str
     reasoning_effort: ReasoningEffort | None = None
+    permission_mode: PermissionMode | None = None
 
 
 class RoutingConfig(BaseModel):
