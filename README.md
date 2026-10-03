@@ -14,8 +14,10 @@ dennice benchmark list
 dennice benchmark run --mode router --json
 ```
 
-The initial release is intentionally offline: it uses a deterministic router and
-mock executor to validate the architecture before model or database adapters are added.
+The deterministic router remains the default. Press `s` in the TUI to open
+**Setup** and choose the offline mock executor or the local Codex CLI executor.
+The Codex option uses your existing `codex login` session and runs with a
+read-only sandbox; Dennice never stores provider credentials.
 
 ### Windows
 

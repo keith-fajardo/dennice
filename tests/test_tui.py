@@ -1,6 +1,6 @@
 import asyncio
 
-from dennice.tui.app import DenniceApp, _wordmark_renderable
+from dennice.tui.app import DenniceApp, SetupScreen, _wordmark_renderable
 
 
 def test_tui_launches_headlessly() -> None:
@@ -27,3 +27,16 @@ async def _launch() -> None:
         assert not app.query_one("#workspace").display
         assert not app.query_one("#details").display
         assert "Cognitive routing" in str(app.query_one("#routing").render())
+
+
+def test_setup_page_opens() -> None:
+    asyncio.run(_open_setup())
+
+
+async def _open_setup() -> None:
+    app = DenniceApp()
+    async with app.run_test() as pilot:
+        app.action_setup()
+        await pilot.pause()
+        assert isinstance(app.screen, SetupScreen)
+        assert "Selected executor: Mock" in str(app.screen.query_one("#setup-provider").render())

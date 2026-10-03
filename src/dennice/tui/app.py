@@ -9,11 +9,13 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Input, Static
+from textual.screen import ModalScreen
+from textual.widgets import Button, Footer, Input, Static
 
 from dennice import __version__
 from dennice.benchmark.dataset import BenchmarkDataset
 from dennice.benchmark.runner import BenchmarkRunner
+from dennice.core.config import ProviderConfig
 from dennice.core.harness import Harness
 from dennice.core.models import BenchmarkMode
 from dennice.core.models import EventKind
@@ -135,6 +137,73 @@ def _wordmark_renderable() -> Text:
     return wordmark
 
 
+class SetupScreen(ModalScreen[ProviderConfig | None]):
+    """Choose a local executor without collecting credentials in Dennice."""
+
+    CSS = """
+    SetupScreen { align: center middle; background: #000000aa; }
+    #setup-dialog {
+        width: 68;
+        height: auto;
+        padding: 1 2;
+        border: tall #f03c95;
+        background: #161616;
+    }
+    #setup-title { text-style: bold; color: #f3f3f3; }
+    #setup-description { color: #b1b1b1; margin: 1 0; }
+    #setup-provider { color: #ffd166; margin-top: 1; }
+    #setup-model { margin-top: 1; }
+    #setup-buttons { height: 3; margin-top: 1; }
+    #setup-buttons Button { margin-right: 1; }
+    #setup-save { margin-top: 1; }
+    #setup-note { color: #8e8e8e; margin-top: 1; }
+    """
+
+    def __init__(self, executor: ProviderConfig) -> None:
+        super().__init__()
+        self.provider = executor.provider if executor.provider in {"mock", "codex"} else "mock"
+        self.model = executor.model
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="setup-dialog"):
+            yield Static("Dennice Setup", id="setup-title")
+            yield Static(
+                "Choose the System 2 executor. Dennice never stores provider credentials.",
+                id="setup-description",
+            )
+            yield Static("", id="setup-provider")
+            with Horizontal(id="setup-buttons"):
+                yield Button("Mock · offline", id="setup-mock")
+                yield Button("Codex CLI · ChatGPT login", id="setup-codex")
+            yield Input(value=self.model, placeholder="Model (for example: default)", id="setup-model")
+            yield Button("Save configuration", variant="primary", id="setup-save")
+            yield Button("Cancel", id="setup-cancel")
+            yield Static(
+                "Codex runs with read-only permissions. Sign in separately with `codex login`.",
+                id="setup-note",
+            )
+
+    def on_mount(self) -> None:
+        self._show_selection()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "setup-mock":
+            self.provider = "mock"
+            self._show_selection()
+        elif event.button.id == "setup-codex":
+            self.provider = "codex"
+            self._show_selection()
+        elif event.button.id == "setup-save":
+            model = self.query_one("#setup-model", Input).value.strip() or "default"
+            self.dismiss(ProviderConfig(provider=self.provider, model=model))
+        elif event.button.id == "setup-cancel":
+            self.dismiss(None)
+
+    def _show_selection(self) -> None:
+        label = "Codex CLI (uses the current Codex login)" if self.provider == "codex" else "Mock (offline)"
+        self.query_one("#setup-provider", Static).update(f"Selected executor: {label}")
+
+
 class DenniceApp(App[None]):
     """Thin Textual control surface over Harness.run_events()."""
 
@@ -144,6 +213,7 @@ class DenniceApp(App[None]):
         ("r", "run_task", "Run task"),
         ("c", "classify_task", "Classify"),
         ("b", "run_benchmark", "Benchmark"),
+        Binding("ctrl+s", "setup", "Setup", priority=True),
         Binding("ctrl+d", "toggle_details", "Details", priority=True),
         ("q", "quit", "Quit"),
     ]
@@ -254,11 +324,11 @@ class DenniceApp(App[None]):
                     id="home-task",
                 )
                 yield Static(
-                    "Run  ·  Route  ·  Benchmark",
+                    "Run  ·  Route  ·  Benchmark  ·  Setup",
                     id="home-modes",
                 )
                 yield Static(
-                    "enter run   c classify   b benchmark   n new task   q quit",
+                    "enter run   c classify   b benchmark   ctrl+s setup   n new task   q quit",
                     id="home-help",
                 )
         with Vertical(id="workspace"):
@@ -302,6 +372,19 @@ class DenniceApp(App[None]):
     def action_run_benchmark(self) -> None:
         self._activate_workspace("")
         self._benchmark()
+
+    def action_setup(self) -> None:
+        self.push_screen(SetupScreen(self.harness.config.executor), self._apply_setup)
+
+    def _apply_setup(self, executor: ProviderConfig | None) -> None:
+        if executor is None:
+            return
+        config = self.harness.config.model_copy(deep=True)
+        config.executor = executor
+        config.save()
+        self.harness = Harness(config)
+        self.query_one("#masthead-copy", Static).update(self._masthead_text())
+        self.notify(f"Saved executor: {executor.provider} ({executor.model})")
 
     def action_toggle_details(self) -> None:
         if not self.query_one("#workspace", Vertical).display:

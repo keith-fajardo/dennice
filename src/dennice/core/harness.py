@@ -15,7 +15,8 @@ from dennice.core.models import (
     RoutingDecision,
     Task,
 )
-from dennice.executors.mock import MockExecutor
+from dennice.executors.base import Executor
+from dennice.executors.factory import executor_from_config
 from dennice.prompting.composer import DefaultPromptComposer
 from dennice.routing.base import CognitiveRouter
 from dennice.routing.rule import RuleRouter
@@ -32,14 +33,14 @@ class Harness:
         router: CognitiveRouter | None = None,
         registry: PackagePolicyRegistry | None = None,
         composer: DefaultPromptComposer | None = None,
-        executor: MockExecutor | None = None,
+        executor: Executor | None = None,
         store: LocalRunStore | None = None,
     ) -> None:
         self.config = config or DenniceConfig()
         self.router = router or RuleRouter()
         self.registry = registry or PackagePolicyRegistry()
         self.composer = composer or DefaultPromptComposer()
-        self.executor = executor or MockExecutor()
+        self.executor = executor or executor_from_config(self.config.executor)
         self.store = store or LocalRunStore(self.config.runs.path)
         self._last_trace: RunTrace | None = None
 
@@ -123,6 +124,9 @@ class Harness:
                 yield record(EventKind.POLICY_SELECTED, {"policy_id": policy.id, "version": policy.version})
 
             request = self.composer.compose(normalized, decision, policies)
+            request = request.model_copy(
+                update={"executor_id": f"{self.executor.id}-{self.executor.version}"}
+            )
             yield record(EventKind.EXECUTION_STARTED, {"executor": self.executor.id})
             output: list[str] = []
             async for event in self.executor.execute(run_id, request):

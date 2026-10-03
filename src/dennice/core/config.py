@@ -40,3 +40,12 @@ class DenniceConfig(BaseModel):
         with config_path.open(encoding="utf-8") as stream:
             raw = yaml.safe_load(stream) or {}
         return cls.model_validate(raw)
+
+    def save(self, path: str | Path | None = None) -> Path:
+        """Persist the complete configuration in a readable project YAML file."""
+        config_path = Path(path) if path else Path("dennice.yaml")
+        config_path.write_text(
+            yaml.safe_dump(self.model_dump(mode="json"), sort_keys=False),
+            encoding="utf-8",
+        )
+        return config_path
