@@ -593,8 +593,16 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
         config.openjev.model = selection.openjev_model
         try:
             check = await (verify_router(config) if component == "router" else verify_executor(config))
-            marker = "✓" if check.ok else "✗"
-            result.update(f"{marker} {provider.title()} {component}: {check.detail}")
+            status = Text()
+            status.append(
+                "✓ Success" if check.ok else "✗ Failed",
+                style="bold #79dc9b" if check.ok else "bold #ff8585",
+            )
+            status.append(
+                f" · {provider.title()} {component}\n{check.detail}",
+                style="#d8d8d8",
+            )
+            result.update(status)
         finally:
             self._connection_tests.pop(component, None)
             button.disabled = False
