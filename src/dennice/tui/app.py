@@ -286,7 +286,25 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
     #setup-permission-buttons { height: 1; }
     #setup-permission-buttons Button { margin-right: 1; }
     #setup-dialog Button { height: 1; min-height: 1; padding: 0 1; }
-    #setup-test-executor, #setup-test-router { margin-top: 1; width: 34; }
+    #setup-test-executor, #setup-test-router {
+        margin-top: 1;
+        width: 34;
+        background: #34557a;
+        color: #ffffff;
+        text-style: bold;
+    }
+    #setup-test-executor:hover, #setup-test-router:hover {
+        background: #466e99;
+    }
+    #setup-test-executor:focus, #setup-test-router:focus {
+        background: #466e99;
+        text-style: bold underline;
+    }
+    #setup-test-executor:disabled, #setup-test-router:disabled {
+        background: #2b4058;
+        color: #c5d5e8;
+        text-opacity: 1;
+    }
     #setup-executor-test-result, #setup-router-test-result { color: #b8b8b8; margin-top: 1; height: auto; }
     #setup-save { margin-top: 2; width: 26; }
     #setup-cancel { margin-top: 1; width: 26; }
