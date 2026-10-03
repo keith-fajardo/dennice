@@ -272,15 +272,15 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
     #setup-description { color: #b1b1b1; margin: 1 0; }
     #setup-provider, #setup-router { color: #ffd166; margin-top: 1; }
     #setup-model-choice, #setup-model-custom, #setup-refresh-codex-models, #setup-router-model, #setup-openjev-endpoint, #setup-openjev-model { margin-top: 1; }
-    #setup-buttons, #setup-router-buttons { height: 2; margin-top: 1; }
+    #setup-buttons, #setup-router-buttons { height: 1; margin-top: 1; }
     #setup-buttons Button, #setup-router-buttons Button { width: 1fr; margin-right: 1; }
     #setup-model-label, #setup-effort-label, #setup-router-model-label, #setup-openjev-label, #setup-jev-label { color: #d8d8d8; margin-top: 1; }
-    #setup-effort-buttons { height: 2; }
+    #setup-effort-buttons { height: 1; }
     #setup-effort-buttons Button { width: 1fr; margin-right: 0; }
     #setup-permission-label { color: #d8d8d8; margin-top: 1; }
-    #setup-permission-buttons { height: 2; }
+    #setup-permission-buttons { height: 1; }
     #setup-permission-buttons Button { margin-right: 1; }
-    #setup-dialog Button { height: 2; min-height: 2; padding: 0 1; }
+    #setup-dialog Button { height: 1; min-height: 1; padding: 0 1; }
     #setup-test { margin-top: 2; width: 34; }
     #setup-test-result { color: #b8b8b8; margin-top: 1; }
     #setup-save { margin-top: 2; width: 26; }
@@ -316,9 +316,9 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
             )
             yield Static("System 2 executor", id="setup-provider")
             with Horizontal(id="setup-buttons"):
-                yield Button("Mock", id="setup-mock")
-                yield Button("Codex", id="setup-codex")
-                yield Button("Claude", id="setup-claude")
+                yield Button("Mock", id="setup-mock", compact=True)
+                yield Button("Codex", id="setup-codex", compact=True)
+                yield Button("Claude", id="setup-claude", compact=True)
             yield Static("Executor model", id="setup-model-label")
             yield Select(
                 self._model_options(),
@@ -327,25 +327,25 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
                 id="setup-model-choice",
             )
             yield Input(value=self._initial_custom_model(), placeholder="Custom model name", id="setup-model-custom")
-            yield Button("Refresh all available Codex models", id="setup-refresh-codex-models")
+            yield Button("Refresh all available Codex models", id="setup-refresh-codex-models", compact=True)
             yield Static("Execution effort", id="setup-effort-label")
             with Horizontal(id="setup-effort-buttons"):
-                yield Button("Default", id="effort-default")
-                yield Button("Low", id="effort-low")
-                yield Button("Medium", id="effort-medium")
-                yield Button("High", id="effort-high")
-                yield Button("XHigh", id="effort-xhigh")
+                yield Button("Default", id="effort-default", compact=True)
+                yield Button("Low", id="effort-low", compact=True)
+                yield Button("Medium", id="effort-medium", compact=True)
+                yield Button("High", id="effort-high", compact=True)
+                yield Button("XHigh", id="effort-xhigh", compact=True)
             yield Static("Permission mode", id="setup-permission-label")
             with Horizontal(id="setup-permission-buttons"):
-                yield Button("Read only", id="permission-read-only")
-                yield Button("Workspace write", id="permission-workspace-write")
-                yield Button("Plan", id="permission-plan")
+                yield Button("Read only", id="permission-read-only", compact=True)
+                yield Button("Workspace write", id="permission-workspace-write", compact=True)
+                yield Button("Plan", id="permission-plan", compact=True)
             yield Static("System 1 cognitive router", id="setup-router")
             with Horizontal(id="setup-router-buttons"):
-                yield Button("Rule", id="router-rule")
-                yield Button("Codex", id="router-codex")
-                yield Button("Jev", id="router-jev")
-                yield Button("OpenJev", id="router-openjev")
+                yield Button("Rule", id="router-rule", compact=True)
+                yield Button("Codex", id="router-codex", compact=True)
+                yield Button("Jev", id="router-jev", compact=True)
+                yield Button("OpenJev", id="router-openjev", compact=True)
             yield Static("Codex router model", id="setup-router-model-label")
             yield Input(
                 value=self.router_model,
@@ -365,10 +365,10 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
                 placeholder="JEV_API_KEY",
                 id="setup-jev-api-key-env",
             )
-            yield Button("Test selected connections", id="setup-test")
+            yield Button("Test selected connections", id="setup-test", compact=True)
             yield Static("", id="setup-test-result")
-            yield Button("Save configuration", variant="primary", id="setup-save")
-            yield Button("Cancel", id="setup-cancel")
+            yield Button("Save configuration", variant="primary", id="setup-save", compact=True)
+            yield Button("Cancel", id="setup-cancel", compact=True)
 
     def on_mount(self) -> None:
         self._show_selection()
