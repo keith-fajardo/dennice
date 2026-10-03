@@ -4,7 +4,7 @@ from enum import Enum
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ReasoningEffort(str, Enum):
@@ -46,9 +46,20 @@ class JevConfig(BaseModel):
     """Reference to a Jev credential without serializing the credential itself."""
 
     api_key_env: str = "JEV_API_KEY"
-    endpoint: str = "https://thejevai.com/v1/systemone"
-    model: str = "typesafe/jev-1.13"
+    endpoint: str = "https://api.typesafe.ai/v1/systemone"
+    model: str = "jev-latest"
     timeout_seconds: float = Field(default=15.0, gt=0.0, le=60.0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_default(cls, value: object) -> object:
+        """Repair the previously shipped third-party endpoint/model pairing."""
+        if isinstance(value, dict) and (
+            value.get("endpoint") == "https://thejevai.com/v1/systemone"
+            and value.get("model", "typesafe/jev-1.13") == "typesafe/jev-1.13"
+        ):
+            return {**value, "endpoint": "https://api.typesafe.ai/v1/systemone", "model": "jev-latest"}
+        return value
 
 
 class OpenJevConfig(BaseModel):

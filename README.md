@@ -44,9 +44,11 @@ override. Setup provides the same selector. The curated choices appear first;
 for Codex, **Refresh all available Codex models** loads the model catalog that
 your installed and signed-in Codex CLI exposes. That keeps model availability
 account-specific rather than claiming that every OpenAI API model is usable by a
-given ChatGPT subscription. In Setup, **Test selected connections** checks the
-unsaved System 1 router and System 2 executor choices and reports their
-provider-specific error without changing `dennice.yaml`.
+given ChatGPT subscription. In Setup, **Test executor** and **Test router**
+independently check their respective unsaved choices and report the provider
+tested and its result without changing `dennice.yaml`. Choosing Claude as the
+executor leaves the router choice independent; Codex or Jev may still route
+tasks before Claude executes them.
 
 You can update the executor from the composer with `/effort
 <low|medium|high|xhigh|default>` and `/permissions
@@ -68,8 +70,8 @@ openjev:
   model: openjev
 jev:
   api_key_env: JEV_API_KEY
-  endpoint: https://thejevai.com/v1/systemone
-  model: typesafe/jev-1.13
+  endpoint: https://api.typesafe.ai/v1/systemone
+  model: jev-latest
 ```
 
 Use `default` for either setting when you want Codex to choose its configured
@@ -81,7 +83,7 @@ environment-variable name (default `JEV_API_KEY`), never the secret. Export the
 value in your shell before starting Dennice. The first shipped local router is
 **OpenJev · local**, which uses only the configured local endpoint and needs no
 API key. Both use the `/v1/systemone` typed-decision protocol rather than a task
-solution. [Jev’s System One documentation](https://github.com/jev-ai/system-one-jev/blob/main/README.md)
+solution. [TypeSafe’s official Jev quickstart](https://docs.typesafe.ai/introduction/quickstart)
 and [OpenJev’s documentation](https://huggingface.co/openjev/openjev) describe
 that contract.
 

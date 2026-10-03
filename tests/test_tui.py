@@ -73,12 +73,16 @@ async def _test_setup_connections() -> None:
     async with app.run_test() as pilot:
         app.action_setup()
         await pilot.pause()
-        app.screen.query_one("#setup-test").press()
+        app.screen.query_one("#setup-test-executor").press()
         await pilot.pause()
         await app.screen.workers.wait_for_complete()
-        result = str(app.screen.query_one("#setup-test-result").render())
-        assert "System 1 router" in result
-        assert "System 2 executor" in result
+        result = str(app.screen.query_one("#setup-executor-test-result").render())
+        assert "Mock executor" in result
+        assert str(app.screen.query_one("#setup-router-test-result").render()) == ""
+        app.screen.query_one("#setup-test-router").press()
+        await pilot.pause()
+        await app.screen.workers.wait_for_complete()
+        assert "Rule router" in str(app.screen.query_one("#setup-router-test-result").render())
 
 
 def test_transcript_keeps_prior_turns(tmp_path, monkeypatch) -> None:

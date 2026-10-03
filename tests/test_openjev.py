@@ -1,5 +1,5 @@
 from dennice.cognition.taxonomy import CognitiveDemand
-from dennice.core.config import DenniceConfig, OpenJevConfig, ProviderConfig
+from dennice.core.config import DenniceConfig, JevConfig, OpenJevConfig, ProviderConfig
 from dennice.core.harness import Harness
 from dennice.core.models import Task
 from dennice.routing.factory import router_from_config
@@ -13,6 +13,17 @@ def test_openjev_payload_uses_typed_system_one_questions() -> None:
     assert payload["questions"]["task_family"]["type"] == "choice"
     assert payload["questions"]["primary_demand"]["type"] == "choice"
     assert payload["questions"]["supporting_decomposition"]["type"] == "noul"
+
+
+def test_legacy_jev_default_migrates_to_official_typesafe_endpoint() -> None:
+    config = JevConfig.model_validate({
+        "endpoint": "https://thejevai.com/v1/systemone",
+        "model": "typesafe/jev-1.13",
+        "api_key_env": "TYPESAFE_API_KEY",
+    })
+    assert config.endpoint == "https://api.typesafe.ai/v1/systemone"
+    assert config.model == "jev-latest"
+    assert config.api_key_env == "TYPESAFE_API_KEY"
 
 
 def test_openjev_response_becomes_a_provider_neutral_routing_decision() -> None:

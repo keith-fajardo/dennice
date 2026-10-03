@@ -286,8 +286,8 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
     #setup-permission-buttons { height: 1; }
     #setup-permission-buttons Button { margin-right: 1; }
     #setup-dialog Button { height: 1; min-height: 1; padding: 0 1; }
-    #setup-test { margin-top: 2; width: 34; }
-    #setup-test-result { color: #b8b8b8; margin-top: 1; }
+    #setup-test-executor, #setup-test-router { margin-top: 1; width: 34; }
+    #setup-executor-test-result, #setup-router-test-result { color: #b8b8b8; margin-top: 1; height: auto; }
     #setup-save { margin-top: 2; width: 26; }
     #setup-cancel { margin-top: 1; width: 26; }
     #setup-note { color: #8e8e8e; margin-top: 1; }
@@ -311,12 +311,14 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
         self.jev_api_key_env = config.jev.api_key_env
         self.openjev_endpoint = config.openjev.endpoint
         self.openjev_model = config.openjev.model
+        self._connection_tests: dict[str, str] = {}
+        self._connection_frame = 0
 
     def compose(self) -> ComposeResult:
         with Vertical(id="setup-dialog"):
             yield Static("Dennice Setup", id="setup-title")
             yield Static(
-                "System 2 executes; System 1 chooses cognitive policies. Credentials stay outside Dennice.",
+                "Choose two independent providers: the executor answers your task; the router selects its reasoning policies. Changing one does not change the other.",
                 id="setup-description",
             )
             yield Static("System 2 executor", id="setup-provider")
@@ -345,6 +347,8 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
                 yield Button("Read only", id="permission-read-only", compact=True)
                 yield Button("Workspace write", id="permission-workspace-write", compact=True)
                 yield Button("Plan", id="permission-plan", compact=True)
+            yield Button("Test executor", id="setup-test-executor", compact=True)
+            yield Static("", id="setup-executor-test-result")
             yield Static("System 1 cognitive router", id="setup-router")
             with Horizontal(id="setup-router-buttons"):
                 yield Button("Rule", id="router-rule", compact=True)
@@ -370,13 +374,14 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
                 placeholder="JEV_API_KEY",
                 id="setup-jev-api-key-env",
             )
-            yield Button("Test selected connections", id="setup-test", compact=True)
-            yield Static("", id="setup-test-result")
+            yield Button("Test router", id="setup-test-router", compact=True)
+            yield Static("", id="setup-router-test-result")
             yield Button("Save configuration", variant="primary", id="setup-save", compact=True)
             yield Button("Cancel", id="setup-cancel", compact=True)
 
     def on_mount(self) -> None:
         self._show_selection()
+        self.set_interval(0.12, self._animate_connection_tests)
         if self.executor_provider == "codex":
             self._load_codex_model_catalog()
 
@@ -415,8 +420,10 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
             self._show_selection()
         elif event.button.id == "setup-refresh-codex-models":
             self._load_codex_model_catalog()
-        elif event.button.id == "setup-test":
-            self._test_selected_connections()
+        elif event.button.id == "setup-test-executor":
+            self._test_connection("executor")
+        elif event.button.id == "setup-test-router":
+            self._test_connection("router")
         elif event.button.id == "setup-save":
             self.dismiss(self._selection_from_fields())
         elif event.button.id == "setup-cancel":
@@ -430,6 +437,8 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
         }
         label = executor_labels[self.executor_provider]
         self.query_one("#setup-provider", Static).update(f"System 2 executor: {label}")
+        self.query_one("#setup-test-executor", Button).label = f"Test executor · {self.executor_provider.title()}"
+        self.query_one("#setup-test-router", Button).label = f"Test router · {self.router_provider.title()}"
         model_selected = self.executor_provider in {"codex", "claude"}
         for widget_id in ("#setup-model-label", "#setup-model-choice"):
             self.query_one(widget_id).display = model_selected
@@ -547,29 +556,41 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
             openjev_model=openjev_model,
         )
 
-    @work(exclusive=True)
-    async def _test_selected_connections(self) -> None:
-        """Test current Setup choices without persisting or modifying the project."""
-        button = self.query_one("#setup-test", Button)
-        result = self.query_one("#setup-test-result", Static)
-        button.disabled = True
-        button.label = "Testing connections…"
-        result.update("Checking System 1 and System 2 with the selections above…")
+    @work(group="connection-tests", exclusive=True)
+    async def _test_connection(self, component: str) -> None:
+        """Test only the chosen component, using a snapshot of unsaved fields."""
+        button = self.query_one(f"#setup-test-{component}", Button)
+        result = self.query_one(f"#setup-{component}-test-result", Static)
         selection = self._selection_from_fields()
+        provider = getattr(selection, component).provider
+        self._connection_tests[component] = provider
+        button.disabled = True
+        button.label = f"Testing {provider.title()}…"
+        result.update(f"Checking {provider.title()} {component} with the selections above…")
         config = self.app.harness.config.model_copy(deep=True)  # type: ignore[attr-defined]
         config.executor = selection.executor
         config.router = selection.router
         config.jev.api_key_env = selection.jev_api_key_env
         config.openjev.endpoint = selection.openjev_endpoint
         config.openjev.model = selection.openjev_model
-        router_check, executor_check = await asyncio.gather(verify_router(config), verify_executor(config))
-        lines = []
-        for check in (router_check, executor_check):
+        try:
+            check = await (verify_router(config) if component == "router" else verify_executor(config))
             marker = "✓" if check.ok else "✗"
-            lines.append(f"{marker} {check.component}: {check.detail}")
-        result.update("\n".join(lines))
-        button.disabled = False
-        button.label = "Test selected connections"
+            result.update(f"{marker} {provider.title()} {component}: {check.detail}")
+        finally:
+            self._connection_tests.pop(component, None)
+            button.disabled = False
+            current_provider = getattr(self, f"{component}_provider")
+            button.label = f"Test {component} · {current_provider.title()}"
+
+    def _animate_connection_tests(self) -> None:
+        if not self._connection_tests:
+            return
+        self._connection_frame += 1
+        for component, provider in self._connection_tests.items():
+            self.query_one(f"#setup-{component}-test-result", Static).update(
+                _activity_renderable(f"{provider.title()} {component}", self._connection_frame)
+            )
 
     def _initial_model_choice(self) -> str:
         if self.executor_provider not in EXECUTOR_MODELS:
