@@ -1,6 +1,6 @@
 import asyncio
 
-from dennice.tui.app import DenniceApp, SetupScreen, _wordmark_renderable
+from dennice.tui.app import DenniceApp, SetupScreen, _activity_renderable, _wordmark_renderable
 
 
 def test_tui_launches_headlessly() -> None:
@@ -12,6 +12,12 @@ def test_wordmark_uses_a_star_for_the_i_dot() -> None:
     assert wordmark.count("⭐") == 1
     assert "★" not in wordmark
     assert wordmark.count("\n") == 4
+
+
+def test_activity_indicator_has_spinner_and_executor_name() -> None:
+    activity = _activity_renderable("Codex", 1).plain
+    assert "Working with Codex" in activity
+    assert any(frame in activity for frame in "◐◓◑◒")
 
 
 async def _launch() -> None:

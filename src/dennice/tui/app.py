@@ -75,6 +75,7 @@ WORDMARK_GLYPHS = {
     "i": ("⭐", "  ", "█ ", "█ ", "██"),
     "c": ("    ", " ███", "█   ", "█   ", " ███"),
 }
+SPINNER_FRAMES = ("◐", "◓", "◑", "◒")
 
 
 def _quantize(color: tuple[int, int, int]) -> tuple[int, int, int]:
@@ -135,6 +136,26 @@ def _wordmark_renderable() -> Text:
         if row < 4:
             wordmark.append("\n")
     return wordmark
+
+
+def _activity_renderable(executor_name: str, frame: int) -> Text:
+    """Render a compact spinner whose highlight travels across the status message."""
+    message = f"Working with {executor_name}…"
+    active = frame % len(message)
+    activity = Text("Agent output\n\n")
+    activity.append(f"{SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]} ", style="bold #f03c95")
+    for index, character in enumerate(message):
+        distance = (index - active) % len(message)
+        if distance == 0:
+            style = "bold #fff3fa"
+        elif distance in {1, len(message) - 1}:
+            style = "bold #ff83c1"
+        elif distance in {2, len(message) - 2}:
+            style = "#d94891"
+        else:
+            style = "#7d4562"
+        activity.append(character, style=style)
+    return activity
 
 
 class SetupScreen(ModalScreen[ProviderConfig | None]):
@@ -309,6 +330,8 @@ class DenniceApp(App[None]):
     def __init__(self) -> None:
         super().__init__()
         self.harness = Harness.from_config()
+        self._activity_frame = 0
+        self._run_is_active = False
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="masthead"):
@@ -349,6 +372,7 @@ class DenniceApp(App[None]):
 
     def on_mount(self) -> None:
         self.query_one("#home-task", Input).focus()
+        self.set_interval(0.12, self._animate_activity)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self._start_run(event.value)
@@ -423,25 +447,42 @@ class DenniceApp(App[None]):
         if not task.strip():
             return
         self.query_one("#events", Static).update("Tools / events\nStarting run...")
-        self.query_one("#output", Static).update("Agent output\nWorking…")
+        self._run_is_active = True
+        self._activity_frame = 0
+        self._show_activity()
         events: list[str] = []
         output = ""
-        async for event in self.harness.run_events(task):
-            events.append(event.kind.value)
-            self.query_one("#events", Static).update("Tools / events\n" + "\n".join(events))
-            if event.kind == EventKind.ROUTING_COMPLETED:
-                self._show_routing_payload(event.payload["decision"])
-            if event.kind == EventKind.MODEL_STREAM:
-                output += str(event.payload["text"])
-                self.query_one("#output", Static).update("Agent output\n" + output)
-            if event.kind == EventKind.RUN_FAILED:
-                error = str(event.payload.get("error", "Unknown execution failure."))
-                self.query_one("#output", Static).update(
-                    "Execution failed\n\n"
-                    + error
-                    + "\n\nThe run trace was saved locally. Press Ctrl+D to inspect its event timeline."
-                )
-                self.notify("Execution failed; details are shown in the chat panel.", severity="error")
+        try:
+            async for event in self.harness.run_events(task):
+                events.append(event.kind.value)
+                self.query_one("#events", Static).update("Tools / events\n" + "\n".join(events))
+                if event.kind == EventKind.ROUTING_COMPLETED:
+                    self._show_routing_payload(event.payload["decision"])
+                if event.kind == EventKind.MODEL_STREAM:
+                    self._run_is_active = False
+                    output += str(event.payload["text"])
+                    self.query_one("#output", Static).update("Agent output\n" + output)
+                if event.kind == EventKind.RUN_FAILED:
+                    self._run_is_active = False
+                    error = str(event.payload.get("error", "Unknown execution failure."))
+                    self.query_one("#output", Static).update(
+                        "Execution failed\n\n"
+                        + error
+                        + "\n\nThe run trace was saved locally. Press Ctrl+D to inspect its event timeline."
+                    )
+                    self.notify("Execution failed; details are shown in the chat panel.", severity="error")
+        finally:
+            self._run_is_active = False
+
+    def _animate_activity(self) -> None:
+        if not self._run_is_active:
+            return
+        self._activity_frame += 1
+        self._show_activity()
+
+    def _show_activity(self) -> None:
+        executor_name = self.harness.executor.id.capitalize()
+        self.query_one("#output", Static).update(_activity_renderable(executor_name, self._activity_frame))
 
     @work(exclusive=True)
     async def _benchmark(self) -> None:
