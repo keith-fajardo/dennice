@@ -32,6 +32,18 @@ class DefaultPromptComposer:
                 )
         if decision:
             sections.append(f"ROUTING CONTEXT\nTask family: {decision.task_family}")
+        history = task.context.get("conversation_history")
+        if isinstance(history, list):
+            turns = [
+                f"{turn['role'].upper()}: {turn['content']}"
+                for turn in history[-16:]
+                if isinstance(turn, dict)
+                and isinstance(turn.get("role"), str)
+                and isinstance(turn.get("content"), str)
+                and turn["content"].strip()
+            ]
+            if turns:
+                sections.append("CONVERSATION HISTORY\n" + "\n\n".join(turns))
         return ExecutionRequest(
             task=task,
             system_instructions="\n\n".join(sections),

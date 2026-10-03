@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image as PILImage
@@ -17,8 +18,7 @@ from dennice.benchmark.dataset import BenchmarkDataset
 from dennice.benchmark.runner import BenchmarkRunner
 from dennice.core.config import ProviderConfig
 from dennice.core.harness import Harness
-from dennice.core.models import BenchmarkMode
-from dennice.core.models import EventKind
+from dennice.core.models import BenchmarkMode, EventKind, Task
 
 
 TERMINAL_MASCOT_GRID = (
@@ -76,6 +76,12 @@ WORDMARK_GLYPHS = {
     "c": ("    ", " ███", "█   ", "█   ", " ███"),
 }
 SPINNER_FRAMES = ("◐", "◓", "◑", "◒")
+
+
+@dataclass
+class ChatMessage:
+    role: str
+    content: str
 
 
 def _quantize(color: tuple[int, int, int]) -> tuple[int, int, int]:
@@ -142,7 +148,7 @@ def _activity_renderable(executor_name: str, frame: int) -> Text:
     """Render a compact spinner whose highlight travels across the status message."""
     message = f"Working with {executor_name}…"
     active = frame % len(message)
-    activity = Text("Agent output\n\n")
+    activity = Text()
     activity.append(f"{SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]} ", style="bold #f03c95")
     for index, character in enumerate(message):
         distance = (index - active) % len(message)
@@ -332,6 +338,7 @@ class DenniceApp(App[None]):
         self.harness = Harness.from_config()
         self._activity_frame = 0
         self._run_is_active = False
+        self._conversation: list[ChatMessage] = []
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="masthead"):
@@ -381,6 +388,8 @@ class DenniceApp(App[None]):
         self._start_run(self._active_task_input().value)
 
     def action_new_task(self) -> None:
+        self._conversation.clear()
+        self._run_is_active = False
         self.query_one("#workspace", Vertical).display = False
         self.query_one("#home", Vertical).display = True
         task = self.query_one("#home-task", Input)
@@ -418,8 +427,19 @@ class DenniceApp(App[None]):
 
     def _start_run(self, task: str) -> None:
         if task.strip():
+            history = [
+                {"role": message.role, "content": message.content}
+                for message in self._conversation
+                if message.content.strip()
+            ]
+            request = Task(
+                prompt=task,
+                context={"conversation_history": history} if history else {},
+            )
+            assistant_message = ChatMessage("assistant", "")
+            self._conversation.extend((ChatMessage("user", task), assistant_message))
             self._activate_workspace(task)
-            self._run(task)
+            self._run(request, assistant_message)
 
     def _active_task_input(self) -> Input:
         if self.query_one("#workspace", Vertical).display:
@@ -443,9 +463,7 @@ class DenniceApp(App[None]):
         self._show_routing(decision)
 
     @work(exclusive=True)
-    async def _run(self, task: str) -> None:
-        if not task.strip():
-            return
+    async def _run(self, task: Task, assistant_message: ChatMessage) -> None:
         self.query_one("#events", Static).update("Tools / events\nStarting run...")
         self._run_is_active = True
         self._activity_frame = 0
@@ -461,15 +479,17 @@ class DenniceApp(App[None]):
                 if event.kind == EventKind.MODEL_STREAM:
                     self._run_is_active = False
                     output += str(event.payload["text"])
-                    self.query_one("#output", Static).update("Agent output\n" + output)
+                    assistant_message.content = output
+                    self._show_transcript()
                 if event.kind == EventKind.RUN_FAILED:
                     self._run_is_active = False
                     error = str(event.payload.get("error", "Unknown execution failure."))
-                    self.query_one("#output", Static).update(
+                    assistant_message.content = (
                         "Execution failed\n\n"
                         + error
                         + "\n\nThe run trace was saved locally. Press Ctrl+D to inspect its event timeline."
                     )
+                    self._show_transcript()
                     self.notify("Execution failed; details are shown in the chat panel.", severity="error")
         finally:
             self._run_is_active = False
@@ -481,8 +501,24 @@ class DenniceApp(App[None]):
         self._show_activity()
 
     def _show_activity(self) -> None:
+        self._show_transcript()
+
+    def _show_transcript(self) -> None:
         executor_name = self.harness.executor.id.capitalize()
-        self.query_one("#output", Static).update(_activity_renderable(executor_name, self._activity_frame))
+        transcript = Text()
+        for index, message in enumerate(self._conversation):
+            label_style = "bold #81aaff" if message.role == "user" else "bold #ff83c1"
+            label = "You" if message.role == "user" else "Dennice"
+            transcript.append(label + "\n", style=label_style)
+            if message.role == "assistant" and not message.content and self._run_is_active:
+                transcript.append_text(_activity_renderable(executor_name, self._activity_frame))
+            else:
+                transcript.append(message.content or "…", style="#e7e7e7")
+            if index < len(self._conversation) - 1:
+                transcript.append("\n\n")
+        output = self.query_one("#output", Static)
+        output.update(transcript)
+        output.scroll_end(animate=False)
 
     @work(exclusive=True)
     async def _benchmark(self) -> None:
