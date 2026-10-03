@@ -95,6 +95,21 @@ async def _show_slash_menu() -> None:
         assert "/benchmark" in str(menu.render())
 
 
+def test_slash_menu_selects_commands_with_arrow_keys(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    asyncio.run(_select_slash_command())
+
+
+async def _select_slash_command() -> None:
+    app = DenniceApp()
+    async with app.run_test() as pilot:
+        app.query_one("#home-task").value = "/"
+        await pilot.pause()
+        await pilot.press("down", "enter")
+        await pilot.pause()
+        assert isinstance(app.screen, SetupScreen)
+
+
 async def _open_setup() -> None:
     app = DenniceApp()
     async with app.run_test() as pilot:

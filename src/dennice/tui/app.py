@@ -6,7 +6,7 @@ from pathlib import Path
 from PIL import Image as PILImage
 from rich.style import Style
 from rich.text import Text
-from textual import work
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -91,6 +91,16 @@ SLASH_COMMANDS = (
 class ChatMessage:
     role: str
     content: str
+
+
+class TaskInput(Input):
+    """Task composer that gives the slash menu first access to navigation keys."""
+
+    def on_key(self, event: events.Key) -> None:
+        app = self.app
+        if isinstance(app, DenniceApp) and app.handle_command_navigation(self, event):
+            event.prevent_default()
+            event.stop()
 
 
 def _quantize(color: tuple[int, int, int]) -> tuple[int, int, int]:
@@ -383,6 +393,8 @@ class DenniceApp(App[None]):
         self._activity_frame = 0
         self._run_is_active = False
         self._conversation: list[ChatMessage] = []
+        self._command_matches: list[tuple[str, str]] = []
+        self._command_selection = 0
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="masthead"):
@@ -393,7 +405,7 @@ class DenniceApp(App[None]):
                 with Horizontal(id="home-brand"):
                     yield self._mascot_widget("home-mascot", width=12, height=5)
                     yield Static(_wordmark_renderable(), id="home-title")
-                yield Input(
+                yield TaskInput(
                     placeholder='Ask anything…  "Investigate a Snowflake cost increase"',
                     id="home-task",
                 )
@@ -415,7 +427,7 @@ class DenniceApp(App[None]):
                         yield Static("Tools / events\nAwaiting task.", id="events")
                 with Vertical(id="agent"):
                     yield Static("", id="output")
-            yield Input(
+            yield TaskInput(
                 placeholder="Describe the next task…  /help for commands",
                 id="workspace-task",
             )
@@ -521,6 +533,7 @@ class DenniceApp(App[None]):
         menu = self.query_one(menu_id, Static)
         if not value.startswith("/"):
             menu.display = False
+            self._command_matches = []
             return
         query = value.lower()
         matches = [
@@ -530,9 +543,48 @@ class DenniceApp(App[None]):
         ]
         if not matches:
             menu.display = False
+            self._command_matches = []
             return
-        menu.update("Commands\n" + "\n".join(f"{command}  {description}" for command, description in matches))
+        self._command_matches = matches
+        self._command_selection = 0
+        self._render_command_menu(menu)
         menu.display = True
+
+    def handle_command_navigation(self, input_widget: TaskInput, event: events.Key) -> bool:
+        menu_id = "#home-command-menu" if input_widget.id == "home-task" else "#workspace-command-menu"
+        menu = self.query_one(menu_id, Static)
+        if not menu.display or not self._command_matches:
+            return False
+        if event.key == "down":
+            self._command_selection = (self._command_selection + 1) % len(self._command_matches)
+            self._render_command_menu(menu)
+            return True
+        if event.key == "up":
+            self._command_selection = (self._command_selection - 1) % len(self._command_matches)
+            self._render_command_menu(menu)
+            return True
+        if event.key != "enter":
+            return False
+        command, _ = self._command_matches[self._command_selection]
+        if "<task>" in command:
+            input_widget.value = command.split(" ", maxsplit=1)[0] + " "
+            menu.display = False
+            return True
+        menu.display = False
+        input_widget.value = ""
+        self._run_slash_command(command)
+        return True
+
+    def _render_command_menu(self, menu: Static) -> None:
+        rendered = Text("Commands\n", style="bold #ff83c1")
+        for index, (command, description) in enumerate(self._command_matches):
+            selected = index == self._command_selection
+            prefix = "› " if selected else "  "
+            style = "bold #fff3fa" if selected else "#c0a8b5"
+            rendered.append(f"{prefix}{command:<16} {description}", style=style)
+            if index < len(self._command_matches) - 1:
+                rendered.append("\n")
+        menu.update(rendered)
 
     def _show_local_message(self, message: str) -> None:
         self._activate_workspace("")
