@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dennice"
+version = "0.1.0"
+description = "A cognitive routing and evaluation harness for data analytics agents."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Dennice contributors" }]
+dependencies = [
+  "pydantic>=2.7,<3",
+  "Pillow>=10",
+  "PyYAML>=6.0",
+  "textual>=0.70",
+  "typer>=0.12,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+
+[project.scripts]
+dennice = "dennice.cli.app:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"dennice.cognition.policies" = ["*.md"]
+"dennice.benchmark.builtin_tasks" = ["*.yaml"]
+"dennice.tui" = ["assets/*.png"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

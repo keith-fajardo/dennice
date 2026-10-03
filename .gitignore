@@ -1,0 +1,7 @@
+.dennice/
+.pytest_cache/
+__pycache__/
+*.egg-info/
+build/
+dist/
+.ruff_cache/
