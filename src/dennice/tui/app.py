@@ -281,7 +281,7 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
     #setup-buttons Button, #setup-router-buttons Button { width: 1fr; margin-right: 1; }
     #setup-model-label, #setup-effort-label, #setup-router-model-label, #setup-openjev-label, #setup-jev-label { color: #d8d8d8; margin-top: 1; }
     #setup-effort-buttons { height: 1; }
-    #setup-effort-buttons Button { width: 1fr; margin-right: 0; }
+    #setup-effort-buttons Button { width: 1fr; min-width: 0; margin-right: 1; padding: 0; }
     #setup-permission-label { color: #d8d8d8; margin-top: 1; }
     #setup-permission-buttons { height: 1; }
     #setup-permission-buttons Button { margin-right: 1; }
@@ -461,6 +461,10 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
                 "permission-read-only": self.permission_mode == PermissionMode.READ_ONLY,
                 "permission-workspace-write": self.permission_mode == PermissionMode.WORKSPACE_WRITE,
                 "permission-plan": self.permission_mode == PermissionMode.PLAN,
+                **{
+                    f"effort-{level}": self.reasoning_effort == level
+                    for level in ("default", "low", "medium", "high", "xhigh")
+                },
             }
         )
         router_labels = {
@@ -637,6 +641,11 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
             "permission-read-only": "Read only",
             "permission-workspace-write": "Workspace write",
             "permission-plan": "Plan",
+            "effort-default": "Default",
+            "effort-low": "Low",
+            "effort-medium": "Medium",
+            "effort-high": "High",
+            "effort-xhigh": "XHigh",
         }
         for button_id, is_selected in selected.items():
             button = self.query_one(f"#{button_id}", Button)
