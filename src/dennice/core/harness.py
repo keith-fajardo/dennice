@@ -19,7 +19,7 @@ from dennice.executors.base import Executor
 from dennice.executors.factory import executor_from_config
 from dennice.prompting.composer import DefaultPromptComposer
 from dennice.routing.base import CognitiveRouter
-from dennice.routing.rule import RuleRouter
+from dennice.routing.factory import router_from_config
 from dennice.runs.store import LocalRunStore
 
 
@@ -37,7 +37,9 @@ class Harness:
         store: LocalRunStore | None = None,
     ) -> None:
         self.config = config or DenniceConfig()
-        self.router = router or RuleRouter()
+        self.router = router or router_from_config(
+            self.config.router, jev=self.config.jev, openjev=self.config.openjev
+        )
         self.registry = registry or PackagePolicyRegistry()
         self.composer = composer or DefaultPromptComposer()
         self.executor = executor or executor_from_config(self.config.executor)
@@ -98,6 +100,7 @@ class Harness:
             started_at=started_at,
             task=normalized,
             executor_id=f"{self.executor.id}-{self.executor.version}",
+            prompt_composer_version=self.composer.version,
             config=self.config.model_dump(mode="json"),
             benchmark=benchmark,
         )

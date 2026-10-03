@@ -30,6 +30,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "dennice.cognition.policies" = ["*.md"]
 "dennice.benchmark.builtin_tasks" = ["*.yaml"]
+"dennice.routing" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

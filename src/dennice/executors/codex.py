@@ -9,6 +9,7 @@ from typing import Any
 
 from dennice.core.config import ReasoningEffort
 from dennice.core.models import EventKind, ExecutionRequest, RunEvent
+from dennice.core.process import command_for_platform
 
 
 class CodexExecutor:
@@ -53,7 +54,7 @@ class CodexExecutor:
         command.append(
             f"{request.system_instructions}\n\nUSER TASK\n{request.task.prompt}"
         )
-        return command
+        return command_for_platform(command)
 
     async def execute(self, run_id: str, request: ExecutionRequest) -> AsyncIterator[RunEvent]:
         try:

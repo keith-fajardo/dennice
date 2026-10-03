@@ -16,7 +16,7 @@ from textual.widgets import Button, Footer, Input, Static
 from dennice import __version__
 from dennice.benchmark.dataset import BenchmarkDataset
 from dennice.benchmark.runner import BenchmarkRunner
-from dennice.core.config import ProviderConfig, ReasoningEffort
+from dennice.core.config import DenniceConfig, ProviderConfig, ReasoningEffort
 from dennice.core.harness import Harness
 from dennice.core.models import BenchmarkMode, EventKind, Task
 
@@ -92,6 +92,14 @@ class ChatMessage:
     role: str
     content: str
 
+
+@dataclass
+class SetupSelection:
+    executor: ProviderConfig
+    router: ProviderConfig
+    jev_api_key_env: str
+    openjev_endpoint: str
+    openjev_model: str
 
 class TaskInput(Input):
     """Task composer that gives the slash menu first access to navigation keys."""
@@ -183,13 +191,13 @@ def _activity_renderable(executor_name: str, frame: int) -> Text:
     return activity
 
 
-class SetupScreen(ModalScreen[ProviderConfig | None]):
-    """Choose a local executor without collecting credentials in Dennice."""
+class SetupScreen(ModalScreen[SetupSelection | None]):
+    """Configure System 1 routing and System 2 execution without secrets."""
 
     CSS = """
     SetupScreen { align: center middle; background: #000000aa; }
     #setup-dialog {
-        width: 68;
+        width: 76;
         height: auto;
         padding: 1 2;
         border: tall #f03c95;
@@ -197,36 +205,52 @@ class SetupScreen(ModalScreen[ProviderConfig | None]):
     }
     #setup-title { text-style: bold; color: #f3f3f3; }
     #setup-description { color: #b1b1b1; margin: 1 0; }
-    #setup-provider { color: #ffd166; margin-top: 1; }
-    #setup-model { margin-top: 1; }
-    #setup-buttons { height: 3; margin-top: 1; }
-    #setup-buttons Button { margin-right: 1; }
-    #setup-model-label, #setup-effort-label { color: #d8d8d8; margin-top: 1; }
+    #setup-provider, #setup-router { color: #ffd166; margin-top: 1; }
+    #setup-model, #setup-router-model, #setup-openjev-endpoint, #setup-openjev-model { margin-top: 1; }
+    #setup-buttons, #setup-router-buttons { height: 3; margin-top: 1; }
+    #setup-buttons Button, #setup-router-buttons Button { margin-right: 1; }
+    #setup-model-label, #setup-effort-label, #setup-router-model-label, #setup-openjev-label, #setup-jev-label { color: #d8d8d8; margin-top: 1; }
     #setup-effort-buttons { height: 3; }
     #setup-effort-buttons Button { margin-right: 1; }
     #setup-save { margin-top: 1; }
     #setup-note { color: #8e8e8e; margin-top: 1; }
     """
 
-    def __init__(self, executor: ProviderConfig) -> None:
+    def __init__(self, config: DenniceConfig) -> None:
         super().__init__()
-        self.provider = executor.provider if executor.provider in {"mock", "codex"} else "mock"
-        self.model = executor.model
-        self.reasoning_effort = executor.reasoning_effort.value if executor.reasoning_effort else "default"
+        self.executor_provider = (
+            config.executor.provider if config.executor.provider in {"mock", "codex", "claude"} else "mock"
+        )
+        self.executor_model = config.executor.model
+        self.reasoning_effort = (
+            config.executor.reasoning_effort.value if config.executor.reasoning_effort else "default"
+        )
+        self.router_provider = (
+            config.router.provider if config.router.provider in {"rule", "codex", "jev", "openjev"} else "rule"
+        )
+        self.router_model = config.router.model
+        self.jev_api_key_env = config.jev.api_key_env
+        self.openjev_endpoint = config.openjev.endpoint
+        self.openjev_model = config.openjev.model
 
     def compose(self) -> ComposeResult:
         with Vertical(id="setup-dialog"):
             yield Static("Dennice Setup", id="setup-title")
             yield Static(
-                "Choose the System 2 executor. Dennice never stores provider credentials.",
+                "Choose the System 2 executor and System 1 cognitive router. Credentials stay outside Dennice.",
                 id="setup-description",
             )
-            yield Static("", id="setup-provider")
+            yield Static("System 2 executor", id="setup-provider")
             with Horizontal(id="setup-buttons"):
                 yield Button("Mock · offline", id="setup-mock")
                 yield Button("Codex CLI · ChatGPT login", id="setup-codex")
-            yield Static("Model", id="setup-model-label")
-            yield Input(value=self.model, placeholder="Model (for example: default)", id="setup-model")
+                yield Button("Claude Code · Claude login", id="setup-claude")
+            yield Static("Executor model", id="setup-model-label")
+            yield Input(
+                value=self.executor_model,
+                placeholder="Model (for example: default)",
+                id="setup-model",
+            )
             yield Static("Reasoning effort", id="setup-effort-label")
             with Horizontal(id="setup-effort-buttons"):
                 yield Button("Default", id="effort-default")
@@ -234,10 +258,35 @@ class SetupScreen(ModalScreen[ProviderConfig | None]):
                 yield Button("Medium", id="effort-medium")
                 yield Button("High", id="effort-high")
                 yield Button("XHigh", id="effort-xhigh")
+            yield Static("System 1 cognitive router", id="setup-router")
+            with Horizontal(id="setup-router-buttons"):
+                yield Button("Rule · offline", id="router-rule")
+                yield Button("Codex CLI", id="router-codex")
+                yield Button("Jev · hosted", id="router-jev")
+                yield Button("OpenJev · local", id="router-openjev")
+            yield Static("Codex router model", id="setup-router-model-label")
+            yield Input(
+                value=self.router_model,
+                placeholder="default",
+                id="setup-router-model",
+            )
+            yield Static("Local OpenJev-compatible server", id="setup-openjev-label")
+            yield Input(
+                value=self.openjev_endpoint,
+                placeholder="http://127.0.0.1:3000/v1/systemone",
+                id="setup-openjev-endpoint",
+            )
+            yield Input(value=self.openjev_model, placeholder="openjev", id="setup-openjev-model")
+            yield Static("Hosted Jev API key environment variable (name only)", id="setup-jev-label")
+            yield Input(
+                value=self.jev_api_key_env,
+                placeholder="JEV_API_KEY",
+                id="setup-jev-api-key-env",
+            )
             yield Button("Save configuration", variant="primary", id="setup-save")
             yield Button("Cancel", id="setup-cancel")
             yield Static(
-                "Codex runs with read-only permissions. Sign in separately with `codex login`.",
+                "Sign in separately with `codex login` or `claude`. Local OpenJev uses no Dennice API key.",
                 id="setup-note",
             )
 
@@ -246,33 +295,90 @@ class SetupScreen(ModalScreen[ProviderConfig | None]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "setup-mock":
-            self.provider = "mock"
+            self.executor_provider = "mock"
             self._show_selection()
         elif event.button.id == "setup-codex":
-            self.provider = "codex"
+            self.executor_provider = "codex"
             if self.query_one("#setup-model", Input).value in {"", "v1"}:
                 self.query_one("#setup-model", Input).value = "default"
+            self._show_selection()
+        elif event.button.id == "setup-claude":
+            self.executor_provider = "claude"
+            if self.query_one("#setup-model", Input).value in {"", "v1"}:
+                self.query_one("#setup-model", Input).value = "default"
+            self._show_selection()
+        elif event.button.id and event.button.id.startswith("router-"):
+            self.router_provider = event.button.id.removeprefix("router-")
             self._show_selection()
         elif event.button.id and event.button.id.startswith("effort-"):
             self.reasoning_effort = event.button.id.removeprefix("effort-")
             self._show_selection()
         elif event.button.id == "setup-save":
             model = self.query_one("#setup-model", Input).value.strip() or "default"
-            effort = None if self.reasoning_effort == "default" else ReasoningEffort(self.reasoning_effort)
-            if self.provider == "mock":
+            effort = (
+                None
+                if self.reasoning_effort == "default"
+                else ReasoningEffort(self.reasoning_effort)
+            )
+            if self.executor_provider == "mock":
                 model, effort = "v1", None
-            self.dismiss(ProviderConfig(provider=self.provider, model=model, reasoning_effort=effort))
+            env_name = self.query_one("#setup-jev-api-key-env", Input).value.strip() or "JEV_API_KEY"
+            router_model = self.query_one("#setup-router-model", Input).value.strip() or "default"
+            endpoint = (
+                self.query_one("#setup-openjev-endpoint", Input).value.strip()
+                or self.openjev_endpoint
+            )
+            openjev_model = self.query_one("#setup-openjev-model", Input).value.strip() or "openjev"
+            if self.router_provider == "rule":
+                router_model = "v1"
+            elif self.router_provider == "openjev":
+                router_model = openjev_model
+            self.dismiss(
+                SetupSelection(
+                    executor=ProviderConfig(
+                        provider=self.executor_provider, model=model, reasoning_effort=effort
+                    ),
+                    router=ProviderConfig(provider=self.router_provider, model=router_model),
+                    jev_api_key_env=env_name,
+                    openjev_endpoint=endpoint,
+                    openjev_model=openjev_model,
+                )
+            )
         elif event.button.id == "setup-cancel":
             self.dismiss(None)
 
     def _show_selection(self) -> None:
-        label = "Codex CLI (uses the current Codex login)" if self.provider == "codex" else "Mock (offline)"
+        executor_labels = {
+            "mock": "Mock (offline)",
+            "codex": "Codex CLI (uses the current ChatGPT/Codex login)",
+            "claude": "Claude Code (uses the current Claude subscription/login)",
+        }
+        label = executor_labels[self.executor_provider]
         self.query_one("#setup-provider", Static).update(f"Selected executor: {label}")
-        codex_selected = self.provider == "codex"
-        for widget_id in ("#setup-model-label", "#setup-model", "#setup-effort-label", "#setup-effort-buttons"):
-            self.query_one(widget_id).display = codex_selected
+        model_selected = self.executor_provider in {"codex", "claude"}
+        for widget_id in ("#setup-model-label", "#setup-model"):
+            self.query_one(widget_id).display = model_selected
+        for widget_id in ("#setup-effort-label", "#setup-effort-buttons"):
+            self.query_one(widget_id).display = self.executor_provider == "codex"
         effort_label = "Default" if self.reasoning_effort == "default" else self.reasoning_effort.upper()
         self.query_one("#setup-effort-label", Static).update(f"Reasoning effort: {effort_label}")
+        router_labels = {
+            "rule": "Rule router (deterministic and offline)",
+            "codex": "Codex router (System 1 only; does not solve the task)",
+            "jev": "Hosted Jev router (System 1; reads its key from the environment)",
+            "openjev": "OpenJev-compatible local router (typed System 1 decisions)",
+        }
+        self.query_one("#setup-router", Static).update(
+            f"Selected router: {router_labels[self.router_provider]}"
+        )
+        for widget_id in ("#setup-router-model-label", "#setup-router-model"):
+            self.query_one(widget_id).display = self.router_provider == "codex"
+        for widget_id in (
+            "#setup-openjev-label",
+            "#setup-openjev-endpoint",
+            "#setup-openjev-model",
+        ):
+            self.query_one(widget_id).display = self.router_provider == "openjev"
 
 
 class DenniceApp(App[None]):
@@ -477,17 +583,24 @@ class DenniceApp(App[None]):
         self._show_command_help()
 
     def action_setup(self) -> None:
-        self.push_screen(SetupScreen(self.harness.config.executor), self._apply_setup)
+        self.push_screen(
+            SetupScreen(self.harness.config),
+            self._apply_setup,
+        )
 
-    def _apply_setup(self, executor: ProviderConfig | None) -> None:
-        if executor is None:
+    def _apply_setup(self, selection: SetupSelection | None) -> None:
+        if selection is None:
             return
         config = self.harness.config.model_copy(deep=True)
-        config.executor = executor
+        config.executor = selection.executor
+        config.router = selection.router
+        config.jev.api_key_env = selection.jev_api_key_env
+        config.openjev.endpoint = selection.openjev_endpoint
+        config.openjev.model = selection.openjev_model
         config.save()
         self.harness = Harness(config)
         self.query_one("#masthead-copy", Static).update(self._masthead_text())
-        self.notify(f"Saved executor: {executor.provider} ({executor.model})")
+        self.notify(f"Saved executor: {selection.executor.provider}; router: {selection.router.provider}")
 
     def action_toggle_details(self) -> None:
         if not self.query_one("#workspace", Vertical).display:

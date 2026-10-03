@@ -4,7 +4,7 @@ from dennice.core.models import ExecutionRequest, ReasoningPolicy, RoutingDecisi
 class DefaultPromptComposer:
     """Composes observable policy guidance without requesting hidden reasoning traces."""
 
-    version = "v1"
+    version = "v2"
 
     def __init__(self, base_instructions: str | None = None) -> None:
         self.base_instructions = base_instructions or (
@@ -19,6 +19,19 @@ class DefaultPromptComposer:
         policies: list[ReasoningPolicy],
     ) -> ExecutionRequest:
         sections = ["BASE EXECUTION INSTRUCTIONS\n" + self.base_instructions]
+        if decision:
+            sections.append(
+                "COGNITIVE ROUTING CONTRACT\n"
+                f"Task family: {decision.task_family}\n"
+                f"Primary cognitive demand: {decision.primary_demand.value}\n"
+                "Supporting cognitive demands: "
+                + (", ".join(demand.value for demand in decision.supporting_demands) or "none")
+                + "\n\n"
+                "The route configures how to investigate and reason; it is not a conclusion about "
+                "the task. Follow the selected policies, but do not claim they prove a root cause. "
+                "Make the answer auditable: distinguish evidence from hypotheses, state validation "
+                "or uncertainty, and give concrete next steps when evidence is unavailable."
+            )
         if policies:
             primary = policies[0]
             sections.append(
@@ -30,8 +43,6 @@ class DefaultPromptComposer:
                     f"SUPPORTING REASONING POLICY: {policy.cognitive_demand.value} ({policy.id})\n"
                     + policy.instructions
                 )
-        if decision:
-            sections.append(f"ROUTING CONTEXT\nTask family: {decision.task_family}")
         history = task.context.get("conversation_history")
         if isinstance(history, list):
             turns = [

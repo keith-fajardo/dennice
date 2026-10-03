@@ -2,6 +2,7 @@
 
 from dennice.core.config import ProviderConfig
 from dennice.executors.base import Executor
+from dennice.executors.claude import ClaudeExecutor
 from dennice.executors.codex import CodexExecutor
 from dennice.executors.mock import MockExecutor
 
@@ -12,6 +13,8 @@ def executor_from_config(config: ProviderConfig) -> Executor:
         return MockExecutor()
     if config.provider == "codex":
         return CodexExecutor(model=config.model, reasoning_effort=config.reasoning_effort)
+    if config.provider == "claude":
+        return ClaudeExecutor(model=config.model)
     raise ValueError(
-        f"Unsupported executor provider {config.provider!r}. Choose 'mock' or 'codex' in Dennice Setup."
+        f"Unsupported executor provider {config.provider!r}. Choose 'mock', 'codex', or 'claude' in Dennice Setup."
     )

@@ -1,0 +1,65 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "task_family": {"type": "string", "minLength": 1},
+    "cognitive_demands": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "demand": {
+            "type": "string",
+            "enum": [
+              "critical_inquiry",
+              "empirical_induction",
+              "decomposition",
+              "constraint_reasoning",
+              "causal_categorization",
+              "contradiction_resolution",
+              "abstraction"
+            ]
+          },
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        },
+        "required": ["demand", "confidence"]
+      }
+    },
+    "primary_demand": {
+      "type": "string",
+      "enum": [
+        "critical_inquiry",
+        "empirical_induction",
+        "decomposition",
+        "constraint_reasoning",
+        "causal_categorization",
+        "contradiction_resolution",
+        "abstraction"
+      ]
+    },
+    "supporting_demands": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "critical_inquiry",
+          "empirical_induction",
+          "decomposition",
+          "constraint_reasoning",
+          "causal_categorization",
+          "contradiction_resolution",
+          "abstraction"
+        ]
+      }
+    },
+    "rationale": {"type": ["string", "null"]}
+  },
+  "required": [
+    "task_family",
+    "cognitive_demands",
+    "primary_demand",
+    "supporting_demands"
+  ]
+}
