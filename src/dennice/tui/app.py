@@ -423,7 +423,7 @@ class DenniceApp(App[None]):
         if not task.strip():
             return
         self.query_one("#events", Static).update("Tools / events\nStarting run...")
-        self.query_one("#output", Static).update("Agent output\n")
+        self.query_one("#output", Static).update("Agent output\nWorking…")
         events: list[str] = []
         output = ""
         async for event in self.harness.run_events(task):
@@ -434,6 +434,14 @@ class DenniceApp(App[None]):
             if event.kind == EventKind.MODEL_STREAM:
                 output += str(event.payload["text"])
                 self.query_one("#output", Static).update("Agent output\n" + output)
+            if event.kind == EventKind.RUN_FAILED:
+                error = str(event.payload.get("error", "Unknown execution failure."))
+                self.query_one("#output", Static).update(
+                    "Execution failed\n\n"
+                    + error
+                    + "\n\nThe run trace was saved locally. Press Ctrl+D to inspect its event timeline."
+                )
+                self.notify("Execution failed; details are shown in the chat panel.", severity="error")
 
     @work(exclusive=True)
     async def _benchmark(self) -> None:

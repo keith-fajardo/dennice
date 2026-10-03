@@ -29,7 +29,8 @@ async def _launch() -> None:
         assert "Cognitive routing" in str(app.query_one("#routing").render())
 
 
-def test_setup_page_opens() -> None:
+def test_setup_page_opens(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
     asyncio.run(_open_setup())
 
 
