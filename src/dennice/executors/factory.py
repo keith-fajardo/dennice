@@ -11,7 +11,7 @@ def executor_from_config(config: ProviderConfig) -> Executor:
     if config.provider == "mock":
         return MockExecutor()
     if config.provider == "codex":
-        return CodexExecutor(model=config.model)
+        return CodexExecutor(model=config.model, reasoning_effort=config.reasoning_effort)
     raise ValueError(
         f"Unsupported executor provider {config.provider!r}. Choose 'mock' or 'codex' in Dennice Setup."
     )

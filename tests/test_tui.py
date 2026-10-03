@@ -69,6 +69,11 @@ def test_slash_help_opens_the_command_list(tmp_path, monkeypatch) -> None:
     asyncio.run(_show_slash_help())
 
 
+def test_slash_shows_command_autocomplete(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    asyncio.run(_show_slash_menu())
+
+
 async def _show_slash_help() -> None:
     app = DenniceApp()
     async with app.run_test() as pilot:
@@ -78,6 +83,16 @@ async def _show_slash_help() -> None:
         assert "Commands" in output
         assert "/setup" in output
         assert app.query_one("#workspace").display
+
+
+async def _show_slash_menu() -> None:
+    app = DenniceApp()
+    async with app.run_test() as pilot:
+        app.query_one("#home-task").value = "/"
+        await pilot.pause()
+        menu = app.query_one("#home-command-menu")
+        assert menu.display
+        assert "/benchmark" in str(menu.render())
 
 
 async def _open_setup() -> None:

@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 
 import yaml
 from pydantic import BaseModel, Field
 
 
+class ReasoningEffort(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+
+
 class ProviderConfig(BaseModel):
     provider: str
     model: str
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class RoutingConfig(BaseModel):

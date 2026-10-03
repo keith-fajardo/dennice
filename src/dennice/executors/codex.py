@@ -7,6 +7,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+from dennice.core.config import ReasoningEffort
 from dennice.core.models import EventKind, ExecutionRequest, RunEvent
 
 
@@ -20,8 +21,14 @@ class CodexExecutor:
     id = "codex"
     version = "cli-v1"
 
-    def __init__(self, model: str = "default", command: str = "codex") -> None:
+    def __init__(
+        self,
+        model: str = "default",
+        reasoning_effort: ReasoningEffort | None = None,
+        command: str = "codex",
+    ) -> None:
         self.model = model
+        self.reasoning_effort = reasoning_effort
         self.command = command
 
     def command_for(self, request: ExecutionRequest) -> list[str]:
@@ -39,6 +46,10 @@ class CodexExecutor:
         ]
         if self.model not in {"", "default"}:
             command.extend(["--model", self.model])
+        if self.reasoning_effort is not None:
+            command.extend(
+                ["--config", f'model_reasoning_effort="{self.reasoning_effort.value}"']
+            )
         command.append(
             f"{request.system_instructions}\n\nUSER TASK\n{request.task.prompt}"
         )

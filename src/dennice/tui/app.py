@@ -16,7 +16,7 @@ from textual.widgets import Button, Footer, Input, Static
 from dennice import __version__
 from dennice.benchmark.dataset import BenchmarkDataset
 from dennice.benchmark.runner import BenchmarkRunner
-from dennice.core.config import ProviderConfig
+from dennice.core.config import ProviderConfig, ReasoningEffort
 from dennice.core.harness import Harness
 from dennice.core.models import BenchmarkMode, EventKind, Task
 
@@ -76,6 +76,15 @@ WORDMARK_GLYPHS = {
     "c": ("    ", " ███", "█   ", "█   ", " ███"),
 }
 SPINNER_FRAMES = ("◐", "◓", "◑", "◒")
+SLASH_COMMANDS = (
+    ("/new", "start a fresh conversation"),
+    ("/setup", "choose provider, model, and effort"),
+    ("/details", "show routing and event details"),
+    ("/route <task>", "classify without execution"),
+    ("/run <task>", "route and execute a task"),
+    ("/benchmark", "run the configured benchmark"),
+    ("/help", "show all commands"),
+)
 
 
 @dataclass
@@ -182,6 +191,9 @@ class SetupScreen(ModalScreen[ProviderConfig | None]):
     #setup-model { margin-top: 1; }
     #setup-buttons { height: 3; margin-top: 1; }
     #setup-buttons Button { margin-right: 1; }
+    #setup-model-label, #setup-effort-label { color: #d8d8d8; margin-top: 1; }
+    #setup-effort-buttons { height: 3; }
+    #setup-effort-buttons Button { margin-right: 1; }
     #setup-save { margin-top: 1; }
     #setup-note { color: #8e8e8e; margin-top: 1; }
     """
@@ -190,6 +202,7 @@ class SetupScreen(ModalScreen[ProviderConfig | None]):
         super().__init__()
         self.provider = executor.provider if executor.provider in {"mock", "codex"} else "mock"
         self.model = executor.model
+        self.reasoning_effort = executor.reasoning_effort.value if executor.reasoning_effort else "default"
 
     def compose(self) -> ComposeResult:
         with Vertical(id="setup-dialog"):
@@ -202,7 +215,15 @@ class SetupScreen(ModalScreen[ProviderConfig | None]):
             with Horizontal(id="setup-buttons"):
                 yield Button("Mock · offline", id="setup-mock")
                 yield Button("Codex CLI · ChatGPT login", id="setup-codex")
+            yield Static("Model", id="setup-model-label")
             yield Input(value=self.model, placeholder="Model (for example: default)", id="setup-model")
+            yield Static("Reasoning effort", id="setup-effort-label")
+            with Horizontal(id="setup-effort-buttons"):
+                yield Button("Default", id="effort-default")
+                yield Button("Low", id="effort-low")
+                yield Button("Medium", id="effort-medium")
+                yield Button("High", id="effort-high")
+                yield Button("XHigh", id="effort-xhigh")
             yield Button("Save configuration", variant="primary", id="setup-save")
             yield Button("Cancel", id="setup-cancel")
             yield Static(
@@ -219,16 +240,29 @@ class SetupScreen(ModalScreen[ProviderConfig | None]):
             self._show_selection()
         elif event.button.id == "setup-codex":
             self.provider = "codex"
+            if self.query_one("#setup-model", Input).value in {"", "v1"}:
+                self.query_one("#setup-model", Input).value = "default"
+            self._show_selection()
+        elif event.button.id and event.button.id.startswith("effort-"):
+            self.reasoning_effort = event.button.id.removeprefix("effort-")
             self._show_selection()
         elif event.button.id == "setup-save":
             model = self.query_one("#setup-model", Input).value.strip() or "default"
-            self.dismiss(ProviderConfig(provider=self.provider, model=model))
+            effort = None if self.reasoning_effort == "default" else ReasoningEffort(self.reasoning_effort)
+            if self.provider == "mock":
+                model, effort = "v1", None
+            self.dismiss(ProviderConfig(provider=self.provider, model=model, reasoning_effort=effort))
         elif event.button.id == "setup-cancel":
             self.dismiss(None)
 
     def _show_selection(self) -> None:
         label = "Codex CLI (uses the current Codex login)" if self.provider == "codex" else "Mock (offline)"
         self.query_one("#setup-provider", Static).update(f"Selected executor: {label}")
+        codex_selected = self.provider == "codex"
+        for widget_id in ("#setup-model-label", "#setup-model", "#setup-effort-label", "#setup-effort-buttons"):
+            self.query_one(widget_id).display = codex_selected
+        effort_label = "Default" if self.reasoning_effort == "default" else self.reasoning_effort.upper()
+        self.query_one("#setup-effort-label", Static).update(f"Reasoning effort: {effort_label}")
 
 
 class DenniceApp(App[None]):
@@ -305,6 +339,15 @@ class DenniceApp(App[None]):
     }
     #home-modes { color: #a8a8a8; margin: 1 1 0 1; }
     #home-help { color: #767676; margin-top: 1; }
+    .command-menu {
+        width: 1fr;
+        display: none;
+        margin: 0 1;
+        padding: 1;
+        color: #d8d8d8;
+        border: round #d94891;
+        background: #171116;
+    }
     #workspace { height: 1fr; display: none; }
     #workspace-main { height: 1fr; }
     #details { display: none; width: 38; height: 1fr; }
@@ -354,6 +397,7 @@ class DenniceApp(App[None]):
                     placeholder='Ask anything…  "Investigate a Snowflake cost increase"',
                     id="home-task",
                 )
+                yield Static("", id="home-command-menu", classes="command-menu")
                 yield Static(
                     "Run  ·  Route  ·  Benchmark  ·  Setup",
                     id="home-modes",
@@ -375,6 +419,7 @@ class DenniceApp(App[None]):
                 placeholder="Describe the next task…  /help for commands",
                 id="workspace-task",
             )
+            yield Static("", id="workspace-command-menu", classes="command-menu")
         yield Static(self._status_text(), id="statusline")
         yield Footer(id="footer")
 
@@ -389,6 +434,10 @@ class DenniceApp(App[None]):
         else:
             self._start_run(value)
         event.input.value = ""
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        menu_id = "#home-command-menu" if event.input.id == "home-task" else "#workspace-command-menu"
+        self._show_command_menu(menu_id, event.value)
 
     def action_run_task(self) -> None:
         self._start_run(self._active_task_input().value)
@@ -465,16 +514,25 @@ class DenniceApp(App[None]):
             self._show_local_message(f"Unknown command: /{command}\n\nType /help to see available commands.")
 
     def _show_command_help(self) -> None:
-        self._show_local_message(
-            "Commands\n\n"
-            "/new — start a fresh conversation\n"
-            "/setup — choose the executor and model\n"
-            "/details — show or hide routing and event details\n"
-            "/route <task> — classify without execution\n"
-            "/run <task> — route and execute a task\n"
-            "/benchmark — run the configured benchmark\n"
-            "/help — show this list"
-        )
+        commands = "\n".join(f"{command} — {description}" for command, description in SLASH_COMMANDS)
+        self._show_local_message("Commands\n\n" + commands)
+
+    def _show_command_menu(self, menu_id: str, value: str) -> None:
+        menu = self.query_one(menu_id, Static)
+        if not value.startswith("/"):
+            menu.display = False
+            return
+        query = value.lower()
+        matches = [
+            (command, description)
+            for command, description in SLASH_COMMANDS
+            if command.startswith(query) or query == "/"
+        ]
+        if not matches:
+            menu.display = False
+            return
+        menu.update("Commands\n" + "\n".join(f"{command}  {description}" for command, description in matches))
+        menu.display = True
 
     def _show_local_message(self, message: str) -> None:
         self._activate_workspace("")

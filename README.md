@@ -19,6 +19,20 @@ The deterministic router remains the default. Press `s` in the TUI to open
 The Codex option uses your existing `codex login` session and runs with a
 read-only sandbox; Dennice never stores provider credentials.
 
+For Codex, Setup also stores a model override and optional reasoning effort in
+your local `dennice.yaml`:
+
+```yaml
+executor:
+  provider: codex
+  model: default
+  reasoning_effort: high
+```
+
+Use `default` for either setting when you want Codex to choose its configured
+default. Model availability and supported effort levels depend on your Codex
+account and selected model.
+
 ### Windows
 
 Dennice supports Python 3.11+ on Windows. In PowerShell:
