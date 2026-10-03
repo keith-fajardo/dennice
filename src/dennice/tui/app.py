@@ -86,8 +86,13 @@ EXECUTOR_MODELS: dict[str, tuple[tuple[str, str], ...]] = {
     "codex": (
         ("Use Codex recommended default", "default"),
         ("GPT-6.1 Sol", "gpt-6.1-sol"),
+        ("GPT-6 Sol", "gpt-6-sol"),
         ("GPT-6 Luna", "gpt-6-luna"),
         ("Astra", "gpt-6-astra"),
+        ("GPT-5.6 Sol", "gpt-5.6-sol"),
+        ("GPT-5.6 Terra", "gpt-5.6-terra"),
+        ("GPT-5.6 Luna", "gpt-5.6-luna"),
+        ("GPT-5.5", "gpt-5.5"),
         ("Custom model…", "custom"),
     ),
     "claude": (
@@ -372,6 +377,8 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
 
     def on_mount(self) -> None:
         self._show_selection()
+        if self.executor_provider == "codex":
+            self._load_codex_model_catalog()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "setup-mock":
@@ -387,6 +394,7 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
             self.executor_model = "default"
             self._refresh_model_choices()
             self._show_selection()
+            self._load_codex_model_catalog()
         elif event.button.id == "setup-claude":
             self.executor_provider = "claude"
             self.permission_mode = PermissionMode.PLAN
@@ -578,8 +586,10 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
     async def _load_codex_model_catalog(self) -> None:
         """Ask the installed, signed-in Codex CLI which models it can expose."""
         button = self.query_one("#setup-refresh-codex-models", Button)
+        selector = self.query_one("#setup-model-choice", Select)
         button.disabled = True
         button.label = "Loading Codex model catalog…"
+        selector.disabled = True
         command = command_for_platform(
             ["codex", "debug", "models"], "win32" if os.name == "nt" else "posix"
         )
@@ -610,6 +620,7 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
         except (FileNotFoundError, OSError, TimeoutError, json.JSONDecodeError, RuntimeError) as error:
             self.notify(f"Could not load Codex models: {error}", severity="warning")
         finally:
+            selector.disabled = False
             button.disabled = False
             button.label = "Refresh all available Codex models"
 

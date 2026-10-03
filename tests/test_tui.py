@@ -9,6 +9,7 @@ from dennice.tui.app import (
     ModelPickerScreen,
     SetupScreen,
     TaskComposer,
+    EXECUTOR_MODELS,
     _activity_renderable,
     _wordmark_renderable,
 )
@@ -23,6 +24,10 @@ def test_wordmark_uses_a_star_for_the_i_dot() -> None:
     assert wordmark.count("⭐") == 1
     assert "★" not in wordmark
     assert wordmark.count("\n") == 4
+
+
+def test_codex_model_fallback_includes_terra() -> None:
+    assert ("GPT-5.6 Terra", "gpt-5.6-terra") in EXECUTOR_MODELS["codex"]
 
 
 def test_activity_indicator_has_spinner_and_executor_name() -> None:
