@@ -33,6 +33,7 @@ async def _launch() -> None:
         assert not app.query_one("#workspace").display
         assert not app.query_one("#details").display
         assert "Cognitive routing" in str(app.query_one("#routing").render())
+        assert str(app.query_one("#output").render()) == ""
 
 
 def test_setup_page_opens(tmp_path, monkeypatch) -> None:
@@ -61,6 +62,22 @@ async def _render_transcript() -> None:
         assert "Investigate warehouse spend." in output
         assert "Start with daily credits." in output
         assert "Working with Mock" in output
+
+
+def test_slash_help_opens_the_command_list(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    asyncio.run(_show_slash_help())
+
+
+async def _show_slash_help() -> None:
+    app = DenniceApp()
+    async with app.run_test() as pilot:
+        app._run_slash_command("/help")
+        await pilot.pause()
+        output = str(app.query_one("#output").render())
+        assert "Commands" in output
+        assert "/setup" in output
+        assert app.query_one("#workspace").display
 
 
 async def _open_setup() -> None:

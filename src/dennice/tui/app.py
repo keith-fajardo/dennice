@@ -241,6 +241,7 @@ class DenniceApp(App[None]):
         ("c", "classify_task", "Classify"),
         ("b", "run_benchmark", "Benchmark"),
         Binding("ctrl+s", "setup", "Setup", priority=True),
+        Binding("ctrl+p", "command_help", "Commands", priority=True),
         Binding("ctrl+d", "toggle_details", "Details", priority=True),
         ("q", "quit", "Quit"),
     ]
@@ -358,7 +359,7 @@ class DenniceApp(App[None]):
                     id="home-modes",
                 )
                 yield Static(
-                    "enter run   c classify   b benchmark   ctrl+s setup   n new task   q quit",
+                    "enter run   /help commands   ctrl+s setup   n new task   q quit",
                     id="home-help",
                 )
         with Vertical(id="workspace"):
@@ -369,9 +370,9 @@ class DenniceApp(App[None]):
                     with Vertical(classes="detail-panel"):
                         yield Static("Tools / events\nAwaiting task.", id="events")
                 with Vertical(id="agent"):
-                    yield Static("Agent output\nAwaiting task.", id="output")
+                    yield Static("", id="output")
             yield Input(
-                placeholder="Describe another task…  Press Enter to route and run",
+                placeholder="Describe the next task…  /help for commands",
                 id="workspace-task",
             )
         yield Static(self._status_text(), id="statusline")
@@ -382,7 +383,12 @@ class DenniceApp(App[None]):
         self.set_interval(0.12, self._animate_activity)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        self._start_run(event.value)
+        value = event.value.strip()
+        if value.startswith("/"):
+            self._run_slash_command(value)
+        else:
+            self._start_run(value)
+        event.input.value = ""
 
     def action_run_task(self) -> None:
         self._start_run(self._active_task_input().value)
@@ -406,6 +412,9 @@ class DenniceApp(App[None]):
         self._activate_workspace("")
         self._benchmark()
 
+    def action_command_help(self) -> None:
+        self._show_command_help()
+
     def action_setup(self) -> None:
         self.push_screen(SetupScreen(self.harness.config.executor), self._apply_setup)
 
@@ -424,6 +433,53 @@ class DenniceApp(App[None]):
             return
         details = self.query_one("#details", Vertical)
         details.display = not details.display
+
+    def _run_slash_command(self, value: str) -> None:
+        command, _, argument = value[1:].partition(" ")
+        command = command.lower()
+        argument = argument.strip()
+        if command in {"help", "commands"}:
+            self._show_command_help()
+        elif command == "new":
+            self.action_new_task()
+        elif command == "setup":
+            self.action_setup()
+        elif command == "details":
+            self._activate_workspace("")
+            details = self.query_one("#details", Vertical)
+            details.display = not details.display
+        elif command == "benchmark":
+            self.action_run_benchmark()
+        elif command == "route":
+            if not argument:
+                self._show_local_message("Usage: /route <task>")
+            else:
+                self._activate_workspace(argument)
+                self._classify(argument)
+        elif command == "run":
+            if not argument:
+                self._show_local_message("Usage: /run <task>")
+            else:
+                self._start_run(argument)
+        else:
+            self._show_local_message(f"Unknown command: /{command}\n\nType /help to see available commands.")
+
+    def _show_command_help(self) -> None:
+        self._show_local_message(
+            "Commands\n\n"
+            "/new — start a fresh conversation\n"
+            "/setup — choose the executor and model\n"
+            "/details — show or hide routing and event details\n"
+            "/route <task> — classify without execution\n"
+            "/run <task> — route and execute a task\n"
+            "/benchmark — run the configured benchmark\n"
+            "/help — show this list"
+        )
+
+    def _show_local_message(self, message: str) -> None:
+        self._activate_workspace("")
+        self._conversation.append(ChatMessage("assistant", message))
+        self._show_transcript()
 
     def _start_run(self, task: str) -> None:
         if task.strip():
