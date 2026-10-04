@@ -10,6 +10,7 @@ from dennice.tui.files import (
     DiscardEditsScreen,
     FileActionScreen,
     FileEditorScreen,
+    FilePreviewPane,
     FileSafetyError,
     ProjectFiles,
     WorkspaceFiles,
@@ -114,6 +115,13 @@ class FilesApp(App):
         self.root_path = root
     def compose(self) -> ComposeResult:
         yield WorkspaceFiles(self.root_path)
+        yield FilePreviewPane(id="session-file-preview")
+
+    def on_workspace_files_preview_requested(self, event: WorkspaceFiles.PreviewRequested):
+        event.stop()
+        self.query_one(FilePreviewPane).open_file(
+            event.snapshot, event.line, files=event.files, edit=event.edit
+        )
 
 
 def test_browser_regex_hierarchy_and_file_actions(tmp_path):
@@ -138,15 +146,16 @@ async def _browser(root):
         assert "Search:" in str(sidebar.query_one("#file-search-status", Static).render())
         sidebar._open_file("nested/hello.py", "edit")
         await pilot.pause()
-        assert isinstance(app.screen, FileEditorScreen)
-        editor = app.screen.query_one(TextArea)
+        pane = app.query_one(FilePreviewPane)
+        assert pane.display
+        editor = pane.query_one(TextArea)
         editor.insert("# comment\n")
         await pilot.press("ctrl+shift+s")
         await pilot.pause()
         assert "# comment" in (root / "nested/hello.py").read_text()
         await pilot.press("escape")
         await pilot.pause()
-        assert not isinstance(app.screen, FileEditorScreen)
+        assert not pane.display
         app.push_screen(FileActionScreen("nested/hello.py"))
         await pilot.pause()
         assert app.focused.id == "file-show"
@@ -163,7 +172,8 @@ async def _dirty(root):
     async with app.run_test(size=(100, 35)) as pilot:
         app.query_one(WorkspaceFiles)._open_file("hello.txt", "edit")
         await pilot.pause()
-        editor = app.screen.query_one(TextArea)
+        pane = app.query_one(FilePreviewPane)
+        editor = pane.query_one(TextArea)
         editor.insert("changed")
         await pilot.press("ctrl+z")
         assert editor.text == "hello"
@@ -174,5 +184,5 @@ async def _dirty(root):
         assert isinstance(app.screen, DiscardEditsScreen)
         await pilot.press("escape")
         await pilot.pause()
-        assert isinstance(app.screen, FileEditorScreen)
+        assert pane.display
         assert (root / "hello.txt").read_text() == "hello"

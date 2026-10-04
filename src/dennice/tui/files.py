@@ -131,6 +131,14 @@ class ExplorerTree(Tree):
         self.app.query_one(WorkspaceFiles)._show_file_options(self.cursor_node)
 
     def _node_from_mouse(self, event):
+        # Right-click events from several terminal protocols inherit stale
+        # Rich style metadata from the preceding row. Their local coordinate
+        # is reliable, so use it before metadata for context menus.
+        if event.button == 3:
+            pointer_line = int(event.offset.y + self.scroll_offset.y)
+            node = self.get_node_at_line(pointer_line)
+            if node is not None:
+                return node
         meta = event.style.meta if event.style else {}
         node_id = meta.get("node") if meta else None
         if node_id is not None:
@@ -177,6 +185,15 @@ class ExplorerTree(Tree):
 
     async def _on_click(self, event):
         node = self.pointer_node or self._node_from_mouse(event)
+        # Some backends expose a context click only as Click (without the
+        # matching MouseUp). Handle it here as well as in _on_mouse_up.
+        if event.button == 3:
+            self.pointer_node = None
+            if node is not None:
+                self.move_cursor(node)
+            self.app.query_one(WorkspaceFiles)._show_file_options(node)
+            event.stop()
+            return
         if node is None:
             return
         self.move_cursor(node)

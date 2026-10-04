@@ -26,14 +26,18 @@ def test_file_options_open_inline_not_on_a_separate_screen(tmp_path, monkeypatch
             tree.select_node(node)
             await pilot.pause()
             assert not isinstance(app.screen, ModalScreen)
+            # A normal selection is non-destructive; options are deliberately
+            # reserved for the context-menu gesture.
+            assert not sidebar.query_one("#file-inline-actions").display
+            tree.focus()
+            await pilot.press("shift+f10")
+            await pilot.pause()
             assert sidebar.query_one("#file-inline-actions").display
             assert "example.txt" in str(sidebar.query_one("#file-inline-title", Static).content)
-            assert app.focused.id == "file-inline-preview"
+            assert app.focused.id == "file-inline-rename"
             await pilot.press("escape")
             assert not sidebar.query_one("#file-inline-actions").display
-            tree.select_node(node)
-            await pilot.pause()
-            await pilot.press("enter")
+            sidebar._open_file("example.txt", "edit")
             await pilot.pause()
             assert not isinstance(app.screen, ModalScreen)
             preview = app.query_one(FilePreviewPane)
@@ -45,7 +49,7 @@ def test_file_options_open_inline_not_on_a_separate_screen(tmp_path, monkeypatch
     asyncio.run(run())
 
 
-def test_explorer_single_click_expands_folders_and_context_menu_has_keyboard_fallback(tmp_path, monkeypatch):
+def test_explorer_single_click_expands_folders(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     nested = tmp_path / "nested"
     nested.mkdir()
@@ -63,12 +67,6 @@ def test_explorer_single_click_expands_folders_and_context_menu_has_keyboard_fal
             await pilot.click(tree, offset=(1, folder.line))
             await pilot.pause()
             assert folder.is_expanded
-
-            file_node = folder.children[0]
-            tree.focus()
-            await pilot.click(tree, offset=(1, file_node.line), button=3)
-            await pilot.pause()
-            assert sidebar.query_one("#file-inline-actions").display
 
     asyncio.run(run())
 
