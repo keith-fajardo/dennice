@@ -74,6 +74,7 @@ def test_api_payloads_include_cognitive_instructions(provider, path):
 
 def test_api_response_extraction(monkeypatch):
     monkeypatch.setattr("dennice.executors.api.request_json", lambda *args: {
+        "status": "completed",
         "output": [{"content": [{"type": "output_text", "text": "Hello"}]}]
     })
     async def execute():
@@ -81,6 +82,45 @@ def test_api_response_extraction(monkeypatch):
         request = ExecutionRequest(task=Task(prompt="hi"), system_instructions="policy")
         return [event async for event in executor.execute("test", request)]
     assert asyncio.run(execute())[0].payload["text"] == "Hello"
+
+
+def test_missing_usage_stops_api_tool_loop_without_faking_zero(monkeypatch):
+    class Broker:
+        calls = 0
+
+        def definitions(self):
+            return [{"name": "shell", "description": "test", "parameters": {}}]
+
+        async def invoke(self, *args):
+            self.calls += 1
+            return "executed"
+
+    async def stream(*args):
+        yield "result", {
+            "usage": {},
+            "choices": [{"finish_reason": "tool_calls", "message": {
+                "tool_calls": [{"id": "call-1", "function": {"name": "shell", "arguments": "{}"}}],
+            }}],
+        }
+
+    monkeypatch.setattr("dennice.executors.api.stream_request", stream)
+    broker = Broker()
+    executor = APIExecutor(ProviderConfig(provider="local", model="test"),
+                           broker=broker, budgets=DenniceConfig().budgets)
+    request = ExecutionRequest(task=Task(prompt="run a command"), system_instructions="policy")
+    events = []
+
+    async def execute():
+        with pytest.raises(RuntimeError, match="token budget cannot be enforced"):
+            async for event in executor.execute("run", request):
+                events.append(event)
+
+    asyncio.run(execute())
+    usage = next(event for event in events if event.kind.value == "usage")
+    assert usage.payload["reported"] is False
+    assert usage.payload["input_tokens"] is None
+    assert usage.payload["output_tokens"] is None
+    assert broker.calls == 0
 
 
 def test_anthropic_catalog_paginates(monkeypatch):

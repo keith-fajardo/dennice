@@ -6,9 +6,12 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from importlib.resources import as_file, files
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from dennice.core.config import ReasoningEffort
+from dennice.core.codex_auth import check_codex_auth
+from dennice.core.jsonrpc import AppServerClient
 from dennice.core.models import RoutingDecision, Task
 from dennice.core.process import command_for_platform, process_group_options, read_bounded, stop_process
 
@@ -24,10 +27,16 @@ class CodexRouter:
         model: str = "default",
         reasoning_effort: ReasoningEffort | None = None,
         command: str = "codex",
+        timeout_seconds: float = 60,
+        cli_auth_mode: str = "chatgpt",
     ) -> None:
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.command = command
+        self.timeout_seconds = timeout_seconds
+        if cli_auth_mode not in {"chatgpt", "api_key", "provider_default"}:
+            raise ValueError("Unknown Codex CLI authentication mode")
+        self.cli_auth_mode = cli_auth_mode
 
     def command_for(self, prompt: str, schema_path: str) -> list[str]:
         """Build a read-only Codex invocation that is incapable of executing a task."""
@@ -65,11 +74,20 @@ class CodexRouter:
         return decision.model_copy(update={"router_id": self.id, "router_version": self.version})
 
     async def _run(self, prompt: str, schema_path: str) -> str:
+        # Classification needs only the supplied text. Never put the router's
+        # read-only CLI process in the user's project directory.
+        with TemporaryDirectory(prefix="dennice-codex-router-") as directory:
+            return await self._run_in_directory(prompt, schema_path, directory)
+
+    async def _run_in_directory(self, prompt: str, schema_path: str, directory: str) -> str:
+        async with AppServerClient(self.command, cwd=directory) as client:
+            await check_codex_auth(client, self.cli_auth_mode)
         try:
             process = await asyncio.create_subprocess_exec(
                 *self.command_for(prompt, schema_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=directory,
                 **process_group_options(),
             )
         except FileNotFoundError as exc:
@@ -83,24 +101,27 @@ class CodexRouter:
         final_message: str | None = None
         errors: list[str] = []
         try:
-            async for payload in self._events(process.stdout):
-                if payload.get("type") == "error":
-                    errors.append(str(payload.get("message") or payload.get("error") or payload))
-                item = payload.get("item")
-                if payload.get("type") == "item.completed" and isinstance(item, dict):
-                    if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
-                        final_message = item["text"]
-            return_code = await process.wait()
-            stderr = (await stderr_task).decode(errors="replace").strip()
+            async with asyncio.timeout(self.timeout_seconds):
+                async for payload in self._events(process.stdout):
+                    if payload.get("type") == "error":
+                        errors.append("Native provider reported an error event")
+                    item = payload.get("item")
+                    if payload.get("type") == "item.completed" and isinstance(item, dict):
+                        if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                            final_message = item["text"]
+                return_code = await process.wait()
+                await stderr_task
         finally:
             await stop_process(process)
             stderr_task.cancel()
             await asyncio.gather(stderr_task, return_exceptions=True)
         if return_code != 0:
-            detail = "\n".join(errors + ([stderr] if stderr else []))
-            raise RuntimeError(f"Codex router exited with status {return_code}. {detail}".strip())
+            raise RuntimeError(
+                f"Codex router exited with status {return_code}. "
+                "Inspect the provider CLI locally; raw diagnostics are withheld from the run trace."
+            )
         if errors:
-            raise RuntimeError("Codex router reported an error: " + "\n".join(errors))
+            raise RuntimeError("Codex router reported an error event; no automatic replay.")
         if final_message is None:
             raise RuntimeError("Codex router completed without a routing decision.")
         return final_message

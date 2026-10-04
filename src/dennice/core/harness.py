@@ -208,7 +208,21 @@ class Harness:
             if decision is not None:
                 trace.routing = decision
             await dispatch("after_route")
-            effective, plan = select_route(config, normalized, decision.assessment if decision else None)
+            policies = []
+            if decision and config.routing.pa_enabled:
+                scores = {score.demand: score.confidence for score in decision.cognitive_demands}
+                if scores[decision.primary_demand] >= config.routing.primary_threshold:
+                    supporting = [
+                        demand for demand in decision.supporting_demands
+                        if scores[demand] >= config.routing.supporting_threshold
+                    ][:config.routing.max_supporting_policies]
+                    policies = self.registry.resolve_many([decision.primary_demand, *supporting])
+            trace.policies = policies
+            request = self.composer.compose(normalized, decision, policies)
+            effective, plan = select_route(
+                config, normalized, decision.assessment if decision else None,
+                system_instructions=request.system_instructions,
+            )
             trace.route_plan = plan
             yield await record(EventKind.ROUTE_SELECTED, plan.model_dump(mode="json"))
             config.executor = effective
@@ -218,17 +232,11 @@ class Harness:
                     store_path=config.runs.path, root=config.tools.root,
                     budgets=config.budgets, hooks=self.hooks, hook_configs=config.hooks)
             trace.executor_id = f"{executor.id}-{executor.version}"
-            policies = self.registry.resolve_many(
-                [decision.primary_demand, *decision.supporting_demands[:config.routing.max_supporting_policies]]
-                if decision and config.routing.pa_enabled else []
-            )
-            trace.policies = policies
             for policy in policies:
                 yield await record(
                     EventKind.POLICY_SELECTED, {"policy_id": policy.id, "version": policy.version}
                 )
 
-            request = self.composer.compose(normalized, decision, policies)
             request = request.model_copy(
                 update={"executor_id": f"{executor.id}-{executor.version}"}
             )
@@ -278,8 +286,11 @@ class Harness:
                 raise RuntimeError("Completion checks failed; run is not verified complete.")
             await dispatch("turn_complete")
             trace.completed_at = datetime.now(timezone.utc)
-            trace.status = "completed"
-            yield await record(EventKind.RUN_COMPLETED, {"output_chars": len(trace.result.output)})
+            verified = trace.verification["independent_checks"]
+            trace.status = "completed" if verified else "unverified"
+            yield await record(EventKind.RUN_COMPLETED, {
+                "output_chars": len(trace.result.output), "verified": verified,
+            })
         except (asyncio.CancelledError, GeneratorExit) as exc:
             trace.status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "interrupted"
             trace.completed_at = datetime.now(timezone.utc)

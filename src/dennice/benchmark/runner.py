@@ -29,7 +29,7 @@ class BenchmarkRunner:
             raise ValueError(f"Benchmark mode {mode.value!r} is designed but not implemented yet")
         results: list[BenchmarkItemResult] = []
         for item in dataset.items:
-            task = item.to_task()
+            task = item.to_task(dataset.evidence.get(item.id))
             benchmark_metadata = {
                 "item_id": item.id,
                 "item_version": item.version,

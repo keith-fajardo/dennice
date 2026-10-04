@@ -1,0 +1,13 @@
+{
+  "fixture": "synthetic development example",
+  "deployment": "2026-10-01T08:00:00Z",
+  "models": [
+    {
+      "name": "fct_orders",
+      "status": "success",
+      "compiled_sql_excerpt": "from orders o left join order_items i on o.order_id = i.order_id left join payment_events p on o.order_id = p.order_id",
+      "note": "Both child tables can contain several rows per order; the new payment_events join was added in this deployment."
+    },
+    {"name": "dim_customers", "status": "success", "compiled_sql_excerpt": "select * from customers"}
+  ]
+}

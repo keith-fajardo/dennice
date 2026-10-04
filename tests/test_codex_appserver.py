@@ -3,14 +3,16 @@ import asyncio
 
 import pytest
 
-from dennice.core.config import PermissionMode
+from dennice.core.config import BudgetConfig, PermissionMode, ProviderConfig
 from dennice.core.models import EventKind, ExecutionRequest, Task
 from dennice.executors.codex_appserver import CodexAppServerExecutor
+from dennice.executors.factory import executor_from_config
 
 
 class FixtureClient:
     instances = []
     messages = []
+    auth_response = {"account": {"type": "chatgpt"}, "requiresOpenaiAuth": True}
     def __init__(self, *args, **kwargs):
         self.requests, self.sent = [], []
         self.queue = list(self.messages)
@@ -22,6 +24,8 @@ class FixtureClient:
         self.closed = True
     async def request(self, method, params, **kwargs):
         self.requests.append((method, params))
+        if method == "account/read":
+            return self.auth_response
         if method in {"thread/start", "thread/resume"}:
             return {"thread": {"id": "thread-fixture"}}
         return {"turn": {"id": "turn-fixture"}}
@@ -44,6 +48,7 @@ def complete(status="completed"):
 @pytest.fixture
 def client(monkeypatch):
     FixtureClient.instances, FixtureClient.messages = [], []
+    FixtureClient.auth_response = {"account": {"type": "chatgpt"}, "requiresOpenaiAuth": True}
     monkeypatch.setattr("dennice.executors.codex_appserver.AppServerClient", FixtureClient)
     return FixtureClient
 
@@ -79,7 +84,8 @@ def test_codex_native_resume_stream_tool_and_usage(client, tmp_path):
         followup.task.context["compaction_summary"] = "IMPORTANT EARLIER REQUIREMENT"
         second = [e async for e in executor.execute("run-second", followup)]
         native = client.instances[-1]
-        resume = native.requests[0]
+        assert native.requests[0] == ("account/read", {"refreshToken": False})
+        resume = native.requests[1]
         assert resume[0] == "thread/resume"
         assert resume[1]["developerInstructions"] == "Fresh policy"
         turn = next(params for method, params in native.requests if method == "turn/start")
@@ -88,6 +94,78 @@ def test_codex_native_resume_stream_tool_and_usage(client, tmp_path):
         assert next(e.payload["input_tokens"] for e in second if e.kind == EventKind.USAGE) == 3
         assert "IMPORTANT EARLIER REQUIREMENT" in turn["input"][0]["text"]
         assert all(instance.closed for instance in client.instances)
+    asyncio.run(journey())
+
+
+@pytest.mark.parametrize("auth_response,chosen,allowed,method", [
+    ({"account": {"type": "chatgpt", "email": "private@example.com"}, "requiresOpenaiAuth": True}, "chatgpt", True, "chatgpt"),
+    ({"account": {"type": "apiKey"}, "requiresOpenaiAuth": True}, "chatgpt", False, "apiKey"),
+    ({"account": {"type": "apiKey"}, "requiresOpenaiAuth": True}, "api_key", True, "apiKey"),
+    ({"account": None, "requiresOpenaiAuth": False}, "provider_default", True, "other_provider"),
+    ({"account": None, "requiresOpenaiAuth": True}, "provider_default", False, None),
+])
+def test_codex_auth_preflight_before_inference(client, tmp_path, auth_response, chosen, allowed, method):
+    client.auth_response = auth_response
+    client.messages = [complete()]
+
+    async def journey():
+        executor = CodexAppServerExecutor(cli_auth_mode=chosen)
+        executor.configure_runtime(root=tmp_path)
+        if allowed:
+            events = [event async for event in executor.execute("run-auth", request())]
+            auth_event = next(event for event in events if event.kind == EventKind.PROVIDER_EVENT)
+            assert auth_event.payload == {"provider": "codex", "event": "auth_checked", "auth_method": method}
+            assert "private@example.com" not in str(events)
+            assert [name for name, _ in client.instances[-1].requests][:3] == ["account/read", "thread/start", "turn/start"]
+        else:
+            with pytest.raises(RuntimeError, match="Codex authentication"):
+                _ = [event async for event in executor.execute("run-auth", request())]
+            assert [name for name, _ in client.instances[-1].requests] == ["account/read"]
+
+    asyncio.run(journey())
+
+
+def test_codex_cli_auth_is_explicit_and_provider_scoped():
+    assert executor_from_config(ProviderConfig(provider="codex", model="default")).cli_auth_mode == "chatgpt"
+    assert executor_from_config(ProviderConfig(
+        provider="codex", model="default", codex_cli_auth="api_key")).cli_auth_mode == "api_key"
+    with pytest.raises(ValueError, match="Codex CLI"):
+        ProviderConfig(provider="claude", model="default", codex_cli_auth="api_key")
+    from dennice.routing.factory import router_from_config
+    assert router_from_config(ProviderConfig(provider="codex", model="default")).cli_auth_mode == "chatgpt"
+    assert router_from_config(ProviderConfig(
+        provider="codex", model="default", codex_cli_auth="api_key")).cli_auth_mode == "api_key"
+
+
+def test_codex_budget_error_reports_cumulative_usage_not_context_window(client, tmp_path):
+    client.messages = [note("thread/tokenUsage/updated", tokenUsage={
+        "total": {"inputTokens": 105, "outputTokens": 6},
+        "last": {"totalTokens": 20}, "modelContextWindow": 200,
+    }), complete()]
+
+    async def journey():
+        executor = CodexAppServerExecutor()
+        executor.configure_runtime(root=tmp_path, budgets=BudgetConfig(max_total_tokens=100))
+        with pytest.raises(RuntimeError, match="111 reported tokens.*100-token per-run limit.*latest model request"):
+            _ = [event async for event in executor.execute("run-budget", request())]
+        assert client.instances[-1].requests[-1][0] == "turn/interrupt"
+
+    asyncio.run(journey())
+
+
+def test_codex_missing_usage_cannot_claim_budgeted_turn_complete(client, tmp_path):
+    client.messages = [note("item/agentMessage/delta", itemId="answer", delta="Partial answer"), complete()]
+
+    async def journey():
+        executor = CodexAppServerExecutor()
+        executor.configure_runtime(root=tmp_path, budgets=BudgetConfig())
+        events = []
+        with pytest.raises(RuntimeError, match="without token usage telemetry.*could not be enforced"):
+            async for event in executor.execute("run-no-usage", request()):
+                events.append(event)
+        assert any(event.kind == EventKind.MODEL_STREAM for event in events)
+        assert not any(event.kind == EventKind.USAGE for event in events)
+
     asyncio.run(journey())
 
 
@@ -126,6 +204,24 @@ def test_codex_disconnect_or_failed_turn_is_not_success(client, tmp_path, events
             _ = [event async for event in executor.execute("run-failed", request())]
         assert client.instances[-1].closed
         assert client.instances[-1].requests[-1][0] == "turn/interrupt"
+    asyncio.run(journey())
+
+
+def test_codex_provider_diagnostics_are_not_saved_raw(client, tmp_path):
+    client.messages = [note("warning", message="private-fixture-token"),
+                       note("turn/completed", turn={"id": "turn-fixture", "status": "failed",
+                                                    "error": {"message": "private-fixture-token"}})]
+
+    async def journey():
+        executor = CodexAppServerExecutor()
+        executor.configure_runtime(root=tmp_path)
+        events = []
+        with pytest.raises(RuntimeError, match="Codex turn failed") as error:
+            async for event in executor.execute("failed", request()):
+                events.append(event)
+        assert "private-fixture-token" not in str(error.value)
+        assert "private-fixture-token" not in str(events)
+
     asyncio.run(journey())
 
 

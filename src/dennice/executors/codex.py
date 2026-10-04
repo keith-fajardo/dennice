@@ -93,23 +93,25 @@ class CodexExecutor:
                 if payload is None:
                     continue
                 if payload.get("type") == "error":
-                    errors.append(str(payload.get("message") or payload.get("error") or payload))
+                    errors.append("Native provider reported an error event")
                     continue
                 text = self._event_text(payload)
                 if text:
                     emitted_text = True
                     yield RunEvent(run_id=run_id, kind=EventKind.MODEL_STREAM, payload={"text": text})
             return_code = await process.wait()
-            stderr = (await stderr_task).decode(errors="replace").strip()
+            await stderr_task
         finally:
             await stop_process(process)
             stderr_task.cancel()
             await asyncio.gather(stderr_task, return_exceptions=True)
         if return_code != 0:
-            detail = "\n".join(errors + ([stderr] if stderr else []))
-            raise RuntimeError(f"Codex CLI exited with status {return_code}. {detail}".strip())
+            raise RuntimeError(
+                f"Codex CLI exited with status {return_code}. "
+                "Inspect the provider CLI locally; raw diagnostics are withheld from the run trace."
+            )
         if errors:
-            raise RuntimeError("Codex CLI reported an error: " + "\n".join(errors))
+            raise RuntimeError("Codex CLI reported an error event; no automatic replay.")
         if not emitted_text:
             raise RuntimeError("Codex CLI completed without an agent response.")
 

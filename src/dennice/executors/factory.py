@@ -21,12 +21,14 @@ def executor_from_config(config: ProviderConfig) -> Executor:
             model=config.model,
             reasoning_effort=config.reasoning_effort,
             permission_mode=config.permission_mode,
+            cli_auth_mode=config.codex_cli_auth or "chatgpt",
         )
     if config.provider == "claude":
         return ClaudeExecutor(
             model=config.model,
             reasoning_effort=config.reasoning_effort,
             permission_mode=config.permission_mode,
+            cli_auth_mode=config.claude_cli_auth or "subscription",
         )
     if config.provider == "copilot":
         return CopilotExecutor(

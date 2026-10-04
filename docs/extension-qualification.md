@@ -2,6 +2,8 @@
 
 The following code is implemented and covered by offline tests. This is not a
 production certification or evidence of improved model quality/cost.
+The [2026-10-04 local qualification record](local-qualification-2026-10-04.md)
+separates observed evidence from release gates that remain open.
 
 | Surface | Supported scope | Important boundary |
 | --- | --- | --- |
@@ -31,7 +33,31 @@ and real CLI round-trip remain an explicit live qualification gate. Filesystem
 checks reject parent traversal, sensitive names, symlinks and hardlinked files,
 and gated Grep requires an explicit regular file rather than a directory-wide
 content scan that could include hidden credentials. Glob patterns must be relative.
-but the actual read/edit is provider-owned: this is not an OS-level TOCTOU sandbox.
+The actual read/edit is provider-owned: this is not an OS-level TOCTOU sandbox.
+
+The local Codex stdio fixture in `tests/test_codex_stdio_integration.py`
+exercises the executor and JSON-RPC transport together. It covers auth
+preflight, approval/denial, session resume, and unfinished-turn interruption.
+It also guards against interrupting a completed turn. This does not replace
+qualification against an installed Codex CLI.
+
+The local Claude CLI-shaped subprocess fixture in
+`tests/test_claude_stdio_integration.py` covers auth preflight, completed and
+incomplete terminal results, native resume, and deterministic child cleanup
+when an event stream closes. It checks both plan and write-profile cleanup;
+the write-profile test substitutes a gate because the development sandbox
+cannot bind the live bridge. It does not replace real Claude hook and
+approval qualification.
+
+The local stdio qualification fixtures in `tests/test_mcp_stdio.py` and
+`tests/test_mcp_stdio_faults.py` exercise the SDK client transport against real
+subprocesses. They cover tool-only, resource-only and prompt-only capability
+shapes; allowlisted calls; pagination cycles; unexpected and substituted
+resource URIs; external schemas and duplicate prompt arguments; oversized
+results; tool errors; server disconnect; and a timed-out call without retry.
+The MCP client preserves the original operation error if SDK transport cleanup
+also fails. This is local macOS evidence only, not a result for the configured
+CI matrix or a real project server.
 
 ## Required release evidence
 
@@ -53,14 +79,19 @@ but the actual read/edit is provider-owned: this is not an OS-level TOCTOU sandb
 5. Run authorized held-out comparisons with independent completion checks and
    critical-failure grading, matched tasks, controlled permissions/workspaces and
    an explicit spending budget. Report missing router/service cost as unknown.
-6. Review current provider integration/authentication terms for the actual
-   distribution/deployment model. Dennice delegates authentication to user-owned
-   CLIs and does not implement third-party subscription OAuth or read tokens.
-   This code choice is not a legal/compliance certification.
+6. Verify the user's own provider account terms and live billing behavior for
+   the selected personal-local-use scope. The
+   [2026-10-04 primary-document mapping](provider-integration-review-2026-10-04.md)
+   is complete for this scope; fixture tests do not establish live auth or
+   billing. OpenAI API calls were excluded at the user's request. Any hosted,
+   shared-credential, or distributed CLI deployment requires a fresh review.
+   Delegating authentication to user-owned CLIs is not a legal/compliance
+   certification.
 
-No live provider calls, configured project hooks/MCP servers, remote CI dispatch,
+No model inference, configured project hooks/MCP servers, remote CI dispatch,
 subscription authentication changes or paid evaluation runs were performed to
-implement these extensions.
+implement these extensions. CLI version/help/schema checks and one failed
+no-inference Codex app-server handshake are recorded separately.
 
 ## Protocol references
 

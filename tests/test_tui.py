@@ -1,12 +1,15 @@
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from rich.console import Console
 
 from textual.widgets import Button, Select, Static
 
+from dennice.core.models import EventKind, RunEvent, Task
 from dennice.tui.app import (
     ApprovalScreen,
     ChatMessage,
@@ -73,6 +76,39 @@ async def _confirm_hook_trust():
         await worker.wait()
         assert fingerprint(app.harness.config.hooks[0]) in app.harness.hooks.trusted
         await pilot.pause()
+
+
+def test_mcp_test_reports_tools_resources_and_prompts_accurately(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    asyncio.run(_mcp_test_reports_capability_counts(tmp_path, monkeypatch))
+
+
+async def _mcp_test_reports_capability_counts(root, monkeypatch):
+    from dennice.core.config import MCPServerConfig
+
+    app = DenniceApp()
+    server = MCPServerConfig(name="demo", enabled=True)
+    app.harness.config.mcp = [server]
+    app.harness.mcp.trust(server, root=str(root))
+    app._session_directory = lambda _session: root
+    messages = []
+    app._show_local_message = messages.append
+
+    @asynccontextmanager
+    async def connected(*_args, **_kwargs):
+        yield SimpleNamespace(
+            status=[{"approved_tools": 1, "approved_resources": 2, "approved_prompts": 3}],
+            definitions=lambda: ["a"] * 6,
+        )
+
+    monkeypatch.setattr(app.harness.mcp, "connect", connected)
+    async with app.run_test():
+        worker = app._extension_command("mcp", "test demo")
+        await worker.wait()
+    assert "1 approved tools" in messages[-1]
+    assert "2 approved resources" in messages[-1]
+    assert "3 approved prompts discovered" in messages[-1]
+    assert "No tools invoked and no resource or prompt content fetched." in messages[-1]
 
 
 def test_goal_without_independent_checks_stops_for_input(tmp_path, monkeypatch):
@@ -178,6 +214,77 @@ async def _api_setup(provider):
         await pilot.pause()
         assert isinstance(app.screen, ModelPickerScreen)
         assert ("Test API model", "test-api-model") in app.screen._options
+
+
+def test_setup_keeps_claude_cli_auth_choice(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    async def check():
+        app = DenniceApp()
+        async with app.run_test() as pilot:
+            app.action_setup()
+            await pilot.pause()
+            app.screen.query_one("#setup-claude", Button).press()
+            await pilot.pause()
+            auth = app.screen.query_one("#setup-claude-auth", Select)
+            assert auth.display and auth.value == "subscription"
+            auth.value = "api_key"
+            app.screen.query_one("#setup-save", Button).press()
+            await pilot.pause()
+            assert app.harness.config.executor.claude_cli_auth == "api_key"
+            app.action_setup()
+            await pilot.pause()
+            assert app.screen.query_one("#setup-claude-auth", Select).value == "api_key"
+
+    asyncio.run(check())
+
+
+def test_setup_keeps_codex_cli_auth_choice(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    async def check():
+        app = DenniceApp()
+        async with app.run_test() as pilot:
+            app.action_setup()
+            await pilot.pause()
+            app.screen.query_one("#setup-codex", Button).press()
+            await pilot.pause()
+            auth = app.screen.query_one("#setup-codex-auth", Select)
+            assert auth.display and auth.value == "chatgpt"
+            auth.value = "api_key"
+            app.screen.query_one("#setup-save", Button).press()
+            await pilot.pause()
+            assert app.harness.config.executor.codex_cli_auth == "api_key"
+            app.action_setup()
+            await pilot.pause()
+            assert app.screen.query_one("#setup-codex-auth", Select).value == "api_key"
+
+    asyncio.run(check())
+
+
+def test_setup_keeps_codex_router_auth_choice(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    async def check():
+        app = DenniceApp()
+        async with app.run_test() as pilot:
+            app.action_setup()
+            await pilot.pause()
+            app.screen.query_one("#router-codex", Button).press()
+            await pilot.pause()
+            app.screen.query_one("#setup-codex", Button).press()
+            await pilot.pause()
+            auth = app.screen.query_one("#setup-router-codex-auth", Select)
+            assert auth.display and auth.value == "chatgpt"
+            auth.value = "api_key"
+            app.screen.query_one("#setup-save", Button).press()
+            await pilot.pause()
+            assert app.harness.config.router.codex_cli_auth == "api_key"
+            app.action_setup()
+            await pilot.pause()
+            assert app.screen.query_one("#setup-router-codex-auth", Select).value == "api_key"
+
+    asyncio.run(check())
 
 
 def test_skills_picker_prepares_prompt_without_running(tmp_path, monkeypatch):
@@ -331,6 +438,10 @@ def test_setup_can_save_github_copilot_subscription_executor(tmp_path, monkeypat
             await pilot.pause()
             screen = app.screen
             assert screen.executor_provider == "copilot"
+            note = screen.query_one("#setup-copilot-note", Static)
+            assert note.display
+            assert "GITHUB_TOKEN" in str(note.render())
+            assert "opted out" in str(note.render())
             assert ("GPT-5.4", "gpt-5.4") in screen._model_options()
             screen.query_one("#setup-save", Button).press()
             await pilot.pause()
@@ -389,6 +500,118 @@ def test_activity_indicator_has_spinner_and_executor_name() -> None:
     activity = _activity_renderable("Codex", 1).plain
     assert "Working with Codex" in activity
     assert any(frame in activity for frame in "◐◓◑◒")
+
+
+def test_activity_status_aligns_with_chat_pane(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    async def check():
+        app = DenniceApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.action_new_session()
+            await pilot.pause()
+            agent = app.query_one("#agent")
+            status = app.query_one("#run-status")
+            output = app.query_one("#output")
+            session = app._ensure_active_session()
+            app._execution_worker = SimpleNamespace(is_finished=False)
+            app._running_session_id = session.id
+            app._run_is_active = True
+            app._show_activity()
+            await pilot.pause()
+            assert status.parent is agent
+            assert status.region.x == output.region.x + 2
+            assert "Working with" in str(status.render())
+
+    asyncio.run(check())
+
+
+def test_failed_run_keeps_partial_response_visible(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    class FailedHarness:
+        _last_trace = None
+        config = SimpleNamespace(budgets=SimpleNamespace(max_total_tokens=100000))
+
+        async def run_events(self, task):
+            yield RunEvent(run_id="run-test", kind=EventKind.MODEL_STREAM, payload={"text": "Partial analysis"})
+            yield RunEvent(run_id="run-test", kind=EventKind.USAGE, payload={
+                "phase": "executor", "provider": "codex", "model": "gpt-5.6-terra",
+                "reported": True, "attempt_id": "codex:run-test", "cumulative": True,
+                "input_tokens": 50000, "output_tokens": 500,
+            })
+            yield RunEvent(run_id="run-test", kind=EventKind.USAGE, payload={
+                "phase": "executor", "provider": "codex", "model": "gpt-5.6-terra",
+                "reported": True, "attempt_id": "codex:run-test", "cumulative": True,
+                "input_tokens": 108379, "output_tokens": 1967,
+                "context_tokens": 32473, "context_window_tokens": 258400,
+            })
+            yield RunEvent(run_id="run-test", kind=EventKind.RUN_FAILED, payload={"error": "Token budget reached"})
+
+    async def check():
+        app = DenniceApp()
+        async with app.run_test() as pilot:
+            app.action_new_session()
+            session = app._ensure_active_session()
+            message = ChatMessage("assistant", "")
+            session.messages.append(message)
+            monkeypatch.setattr(app, "_session_harness", lambda session: FailedHarness())
+            await app._run(Task(prompt="Analyze"), message, session).wait()
+            await pilot.pause()
+            assert "Partial response (unverified)" in message.content
+            assert "Partial analysis" in message.content
+            assert "Token budget reached" in message.content
+            assert session.last_run_tokens == 110346
+            assert "Last run 110,346/100,000 tokens" in app._status_text()
+            assert "Last run 110,346/100,000 tokens" in str(app.query_one("#statusline", Static).render())
+            assert "Ctx " in app._status_text()
+
+    asyncio.run(check())
+
+
+def test_auto_route_displays_effective_model_and_reported_context(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    async def check():
+        app = DenniceApp()
+        async with app.run_test() as pilot:
+            app.action_new_session()
+            session = app._ensure_active_session()
+            configured_model = app.harness.config.executor.model
+            provider = app.harness.config.executor.provider
+
+            class RoutedHarness:
+                _last_trace = None
+                config = SimpleNamespace(
+                    budgets=SimpleNamespace(max_total_tokens=100000),
+                    executor=SimpleNamespace(provider=provider, model=configured_model),
+                )
+
+                async def run_events(self, task):
+                    yield RunEvent(run_id="routed", kind=EventKind.ROUTE_SELECTED, payload={
+                        "effective_model": "routed-small", "effective_effort": "high"})
+                    yield RunEvent(run_id="routed", kind=EventKind.USAGE, payload={
+                        "phase": "executor", "provider": provider, "model": "routed-small",
+                        "reported": True, "input_tokens": 120, "output_tokens": 30,
+                        "context_tokens": 48, "context_window_tokens": 64,
+                    })
+                    yield RunEvent(run_id="routed", kind=EventKind.RUN_COMPLETED, payload={"verified": False})
+
+            message = ChatMessage("assistant", "")
+            session.messages.append(message)
+            monkeypatch.setattr(app, "_session_harness", lambda session: RoutedHarness())
+            await app._run(Task(prompt="Analyze"), message, session).wait()
+            await pilot.pause()
+            status = app._status_text()
+            assert "Last route: routed-small/high" in status
+            assert "Ctx 16 left (48/64)" in status
+            restored = next(item for item in app._session_store.list() if item.id == session.id)
+            assert restored.last_route_effective_model == "routed-small"
+            app.harness.config.executor.model = "changed-model"
+            assert "Last route:" not in app._status_text()
+            assert "Ctx ~" in app._status_text()
+
+    asyncio.run(check())
 
 
 async def _launch() -> None:
@@ -617,6 +840,7 @@ async def _open_setup() -> None:
         await pilot.pause()
         assert isinstance(app.screen, SetupScreen)
         assert "Choose an executor provider" in str(app.screen.query_one("#setup-provider").render())
+        assert not app.screen.query_one("#setup-copilot-note", Static).display
         assert app.screen.query_one("#setup-save", Button).disabled
 
 

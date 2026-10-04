@@ -27,6 +27,21 @@ class NoRedirects(HTTPRedirectHandler):
         return None
 
 
+def require_complete_response(provider: str, result: dict) -> None:
+    """A usable answer requires a terminal provider status, not just text."""
+    if not isinstance(result, dict):
+        raise RuntimeError("Provider returned an invalid response object.")
+    if provider == "openai-api":
+        complete = result.get("status") == "completed"
+    elif provider == "anthropic-api":
+        complete = result.get("stop_reason") in {"end_turn", "tool_use", "stop_sequence"}
+    else:
+        choices = result.get("choices") or []
+        complete = bool(choices and choices[0].get("finish_reason") in {"stop", "tool_calls"})
+    if not complete:
+        raise RuntimeError("Provider response is incomplete.")
+
+
 def connection(config: ProviderConfig):
     default_url, default_env = API_DEFAULTS[config.provider]
     base = (config.base_url or default_url).rstrip("/")
@@ -150,6 +165,7 @@ class APIExecutor:
                 yield event
             return
         result = await asyncio.to_thread(request_json, self.config, path, body)
+        require_complete_response(self.config.provider, result)
         if self.config.provider == "openai-api":
             text = "".join(part.get("text", "") for item in result.get("output", [])
                            for part in item.get("content", []) if part.get("type") == "output_text")
@@ -216,8 +232,22 @@ class APIExecutor:
             if result is None:
                 raise RuntimeError("Provider stream ended without a completed response.")
             usage = result.get("usage") or {}
-            input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0))
-            output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0))
+            if not isinstance(usage, dict):
+                usage = {}
+            input_key = next((key for key in ("input_tokens", "prompt_tokens") if key in usage), None)
+            output_key = next((key for key in ("output_tokens", "completion_tokens") if key in usage), None)
+            if input_key is None or output_key is None:
+                yield RunEvent(run_id=run_id, kind=EventKind.USAGE, payload={
+                    "input_tokens": None, "output_tokens": None, "reported": False,
+                    "attempt_id": attempt_id, "phase": "executor", "provider": self.config.provider,
+                    "model": self.config.model, "source": "unavailable",
+                })
+                raise RuntimeError(
+                    "Provider omitted input/output usage; the token budget cannot be enforced, "
+                    "so no further model or tool calls will run."
+                )
+            input_tokens = usage[input_key]
+            output_tokens = usage[output_key]
             cache_read = usage.get("cache_read_input_tokens", 0) if self.config.provider == "anthropic-api" else usage.get("input_tokens_details", {}).get("cached_tokens", 0)
             cache_created = usage.get("cache_creation_input_tokens", 0) if self.config.provider == "anthropic-api" else 0
             if any(not isinstance(v, int) or isinstance(v, bool) or v < 0 for v in (input_tokens, output_tokens, cache_read, cache_created)):
@@ -297,12 +327,7 @@ async def stream_request(config, path, body):
                     if len(raw) > 4_000_000:
                         raise RuntimeError("API response exceeded size limit.")
                 result = json.loads(raw)
-                if not isinstance(result, dict):
-                    raise RuntimeError("Provider returned an invalid response object.")
-                if provider == "openai-api" and result.get("status") not in {None, "completed"}:
-                    raise RuntimeError("Provider response is incomplete.")
-                if provider == "anthropic-api" and result.get("stop_reason") not in {None, "end_turn", "tool_use", "stop_sequence"}:
-                    raise RuntimeError("Provider response is incomplete.")
+                require_complete_response(provider, result)
                 if provider == "openai-api":
                     text = "".join(p.get("text", "") for item in result.get("output", []) for p in item.get("content", []) if p.get("type") == "output_text")
                 elif provider == "anthropic-api":
@@ -326,6 +351,7 @@ async def stream_request(config, path, body):
                         yield "text", data["delta"]
                     elif kind == "response.completed":
                         result = data["response"]
+                        require_complete_response(provider, result)
                         completed = True
                 elif provider == "anthropic-api":
                     if kind == "message_start":
@@ -369,7 +395,8 @@ async def stream_request(config, path, body):
                         if choices[0].get("finish_reason"):
                             if choices[0]["finish_reason"] not in {"stop", "tool_calls"}:
                                 raise RuntimeError("Local response stopped incompletely.")
-                            result = {"choices": [{"message": {"content": local_text, "tool_calls": list(local_tools.values())}}]}
+                            result = {"choices": [{"finish_reason": choices[0]["finish_reason"],
+                                "message": {"content": local_text, "tool_calls": list(local_tools.values())}}]}
                             completed = True
                     if data.get("usage") and result is not None:
                         result["usage"] = data["usage"]

@@ -55,11 +55,23 @@ class HookManager:
             started = time.monotonic()
             success = False
             outcome_known = False
-            process = await asyncio.create_subprocess_exec(
-                *hook.command, cwd=root, env={key: os.environ[key] for key in ("PATH", "LANG", "TMPDIR", "SYSTEMROOT") if key in os.environ},
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL, **process_group_options(),
-            )
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *hook.command, cwd=root,
+                    env={key: os.environ[key] for key in ("PATH", "LANG", "TMPDIR", "SYSTEMROOT") if key in os.environ},
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL, **process_group_options(),
+                )
+            except Exception as error:
+                if emit:
+                    await emit(EventKind.HOOK_COMPLETED, {
+                        **identity,
+                        "success": False,
+                        "outcome_known": False,
+                        "failure_category": type(error).__name__,
+                        "elapsed_seconds": time.monotonic() - started,
+                    })
+                raise
             try:
                 async with asyncio.timeout(hook.timeout_seconds):
                     process.stdin.write(encoded)

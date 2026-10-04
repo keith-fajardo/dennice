@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ReasoningEffort(str, Enum):
@@ -30,6 +30,16 @@ class ProviderConfig(BaseModel):
     permission_mode: PermissionMode | None = None
     base_url: str | None = None
     api_key_env: str | None = None
+    claude_cli_auth: Literal["subscription", "api_key", "provider_default"] | None = None
+    codex_cli_auth: Literal["chatgpt", "api_key", "provider_default"] | None = None
+
+    @model_validator(mode="after")
+    def validate_cli_auth(self):
+        if self.claude_cli_auth is not None and self.provider != "claude":
+            raise ValueError("claude_cli_auth applies only to the Claude Code CLI provider.")
+        if self.codex_cli_auth is not None and self.provider != "codex":
+            raise ValueError("codex_cli_auth applies only to the Codex CLI provider.")
+        return self
 
 
 class ModelCandidate(BaseModel):
@@ -41,6 +51,14 @@ class ModelCandidate(BaseModel):
     context_tokens: int = Field(default=8192, gt=0)
     enabled: bool = True
 
+    @field_validator("model")
+    @classmethod
+    def model_id_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Model ID must not be blank.")
+        return value
+
 
 class RoutingConfig(BaseModel):
     primary_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
@@ -51,6 +69,31 @@ class RoutingConfig(BaseModel):
     model_pool: dict[str, list[ModelCandidate]] = Field(default_factory=dict)
     pa_enabled: bool = True
     max_supporting_policies: int = Field(default=2, ge=0, le=6)
+
+    @model_validator(mode="after")
+    def validate_model_pool(self):
+        if self.supporting_threshold > self.primary_threshold:
+            raise ValueError("supporting_threshold must not exceed primary_threshold.")
+        providers = {"codex", "claude", "copilot", "openai-api", "anthropic-api", "local"}
+        unknown = sorted(set(self.model_pool) - providers)
+        if unknown:
+            raise ValueError(
+                "Unknown executor provider in routing.model_pool: "
+                f"{', '.join(unknown)}."
+            )
+        for provider, candidates in self.model_pool.items():
+            seen = set()
+            duplicates = set()
+            for candidate in candidates:
+                if candidate.model in seen:
+                    duplicates.add(candidate.model)
+                seen.add(candidate.model)
+            if duplicates:
+                raise ValueError(
+                    f"Duplicate model IDs in routing.model_pool.{provider}: "
+                    f"{', '.join(sorted(duplicates))}."
+                )
+        return self
 
 
 class PrivacyConfig(BaseModel):

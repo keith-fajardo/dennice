@@ -6,6 +6,7 @@ unknown, not a zero-cost or successful run. Rates are caller-supplied snapshots.
 from __future__ import annotations
 
 import math
+from collections import Counter
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -75,7 +76,8 @@ def outcome_record(trace: RunTrace, *, arm: str, item_id: str,
             "verified_completion": verified, "critical_failure": critical_failure,
             "latency_seconds": duration, "usage_known": usage_known,
             "input_tokens": counts[0], "output_tokens": counts[1],
-            "executor_token_cost": cost, "cost_scope": "executor uncached token estimate only"}
+            "executor_token_cost": cost,
+            "cost_scope": "executor token-rate estimate without cache discounts; excludes router and other services"}
 
 
 def summarize_outcomes(records: Iterable[dict]):
@@ -96,8 +98,11 @@ def summarize_outcomes(records: Iterable[dict]):
                       "cost_unknown": len(rows) - len(costs),
                       "known_executor_token_cost_subtotal": sum(costs) if costs else None,
                       "latency_p50": percentile(.5), "latency_p95": percentile(.95)}
-    item_sets = [{row["item_id"] for row in records if row["arm"] == arm} for arm in arms]
-    return {"arms": arms, "paired_item_sets": not item_sets or all(items == item_sets[0] for items in item_sets),
+    item_counts = [Counter(row["item_id"] for row in records if row["arm"] == arm) for arm in arms]
+    # Compare replicate counts as well as IDs. Set comparison can incorrectly
+    # call runs paired when one arm is missing a repeat for an item.
+    return {"arms": arms, "paired_item_sets": not item_counts or all(
+                counts == item_counts[0] for counts in item_counts),
             "warning": "No quality/cost improvement is established by this report alone. Unassessed cases and router/service cost remain unknown."}
 
 

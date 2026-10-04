@@ -14,7 +14,13 @@ def enforce_privacy(config: DenniceConfig) -> None:
         raise PermissionError("Local-only mode rejects remote/CLI providers and unsandboxed hooks/MCP processes.")
 
 
-def select_route(config: DenniceConfig, task: Task, assessment: TaskAssessment | None):
+def select_route(
+    config: DenniceConfig,
+    task: Task,
+    assessment: TaskAssessment | None,
+    *,
+    system_instructions: str = "",
+):
     current = config.executor.model_copy(deep=True)
     route = config.routing
     plan = RoutePlan(mode=route.mode, recommended_model=current.model,
@@ -28,9 +34,9 @@ def select_route(config: DenniceConfig, task: Task, assessment: TaskAssessment |
         or assessment.uncertainty == "high"
         or assessment.complexity in {"complex", "unknown"}
     ) else "lightweight" if assessment.complexity == "simple" and assessment.stakes == "low" else "balanced"
-    # The conservative estimate includes PA/history/image overhead; capability
-    # declarations are operator-managed, never inferred from a model's name.
-    estimated_context = len(task.prompt + str(task.context)) + 6000
+    # Include the composed PA and count UTF-8 bytes so multibyte text cannot
+    # appear artificially small. This is still not a provider token count.
+    estimated_context = len((task.prompt + str(task.context) + system_instructions).encode("utf-8")) + 6000
     # Provider identity is an explicit operator choice. Cognitive routing can
     # choose among that provider's candidates, never change billing/login
     # boundaries by switching to another provider's pool.
@@ -40,10 +46,14 @@ def select_route(config: DenniceConfig, task: Task, assessment: TaskAssessment |
                 and (not (assessment.requires_tools or config.tools.enabled) or candidate.tools)]
     ranks = {"lightweight": 0, "balanced": 1, "strong": 2}
     eligible = [c for c in eligible if ranks[c.tier] >= ranks[tier]]
+    desired_effort = (ReasoningEffort.HIGH if tier == "strong" else
+                      ReasoningEffort.MEDIUM if tier == "balanced" else ReasoningEffort.LOW)
     if route.model_pinned:
         eligible = [c for c in eligible if c.model == current.model]
     if route.effort_pinned and current.reasoning_effort:
         eligible = [c for c in eligible if current.reasoning_effort in c.efforts]
+    elif not route.effort_pinned:
+        eligible = [c for c in eligible if desired_effort in c.efforts]
     if not eligible:
         if route.mode == "auto":
             raise ValueError("No approved capability-compatible model satisfies the route and pins. Configure the pool or use fixed mode; execution was not started.")
@@ -52,8 +62,7 @@ def select_route(config: DenniceConfig, task: Task, assessment: TaskAssessment |
     chosen = min(eligible, key=lambda c: (ranks[c.tier], c.model))
     effort = current.reasoning_effort
     if not route.effort_pinned:
-        desired = ReasoningEffort.HIGH if tier == "strong" else ReasoningEffort.MEDIUM if tier == "balanced" else ReasoningEffort.LOW
-        effort = desired if desired in chosen.efforts else None
+        effort = desired_effort
     plan.recommended_model = chosen.model
     plan.recommended_effort = effort.value if effort else None
     plan.reason = f"{tier} route from complexity={assessment.complexity}, stakes={assessment.stakes}, uncertainty={assessment.uncertainty}; same approved provider."

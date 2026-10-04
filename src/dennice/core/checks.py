@@ -40,5 +40,7 @@ async def verify_result(config, output, *, approve=None, emit=None):
                                                      "exit_code": result["exit_code"]})
         checks.append({"name": str(argv), "passed": result["exit_code"] == 0,
                        "evidence": result})
-    return {"passed": all(check["passed"] for check in checks), "checks": checks,
-            "independent_checks": bool(config.verification.commands or config.verification.required_files)}
+    passed = all(check["passed"] for check in checks)
+    independent = bool(config.verification.commands or config.verification.required_files)
+    return {"passed": passed, "checks": checks,
+            "independent_checks": independent, "verified": passed and independent}

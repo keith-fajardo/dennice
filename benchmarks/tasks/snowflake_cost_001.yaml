@@ -3,8 +3,8 @@ version: v1
 split: development
 task_family: cost_optimization
 prompt: >
-  Snowflake compute credits increased by 38% yesterday.
-  Determine the most likely cause.
+  Snowflake compute credits increased by 38% on 2026-10-01 compared with
+  2026-09-30. Determine the most likely cause.
 gold_cognitive_demands:
   primary: empirical_induction
   supporting:

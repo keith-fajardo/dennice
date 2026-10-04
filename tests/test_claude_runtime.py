@@ -5,9 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from dennice.core.config import BudgetConfig, PermissionMode, ReasoningEffort
+from dennice.core.config import BudgetConfig, PermissionMode, ProviderConfig, ReasoningEffort
 from dennice.core.models import EventKind, ExecutionRequest, Task
 from dennice.executors.claude import ClaudeExecutor
+from dennice.executors.factory import executor_from_config
 from dennice.runs.provider_sessions import ProviderSessionStore
 
 NATIVE_ID = "d075ae2a-c847-4b94-915b-af14d8e597ca"
@@ -63,7 +64,93 @@ def configured(root):
     executor = ClaudeExecutor(reasoning_effort=ReasoningEffort.HIGH,
                               permission_mode=PermissionMode.READ_ONLY)
     executor.configure_runtime(root=root, store_path=root / "runs", budgets=BudgetConfig())
+    async def checked_auth():
+        return "claude.ai"
+    executor._check_auth = checked_auth
     return executor
+
+
+def test_claude_cli_auth_is_explicit_and_provider_scoped():
+    assert executor_from_config(ProviderConfig(provider="claude", model="default")).cli_auth_mode == "subscription"
+    assert executor_from_config(ProviderConfig(
+        provider="claude", model="default", claude_cli_auth="api_key")).cli_auth_mode == "api_key"
+    with pytest.raises(ValueError, match="Claude Code CLI"):
+        ProviderConfig(provider="codex", model="default", claude_cli_auth="api_key")
+
+
+def test_claude_subscription_rejects_api_key_before_spawning(tmp_path, monkeypatch):
+    executor = ClaudeExecutor()
+    executor.configure_runtime(root=tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "secret-never-print")
+
+    async def no_spawn(*args, **kwargs):
+        pytest.fail("Authentication check should reject before launching a process")
+
+    monkeypatch.setattr("dennice.executors.claude.asyncio.create_subprocess_exec", no_spawn)
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY") as error:
+        asyncio.run(executor._check_auth())
+    assert "secret-never-print" not in str(error.value)
+
+
+@pytest.mark.parametrize("name", ClaudeExecutor._SUBSCRIPTION_PROVIDER_OVERRIDES)
+def test_claude_subscription_rejects_provider_routing_overrides_before_spawning(
+    tmp_path, monkeypatch, name
+):
+    executor = ClaudeExecutor()
+    executor.configure_runtime(root=tmp_path)
+    monkeypatch.setenv(name, "private-fixture-value")
+
+    async def no_spawn(*args, **kwargs):
+        pytest.fail("Subscription authentication must reject provider overrides before launch")
+
+    monkeypatch.setattr("dennice.executors.claude.asyncio.create_subprocess_exec", no_spawn)
+    with pytest.raises(RuntimeError, match=name) as error:
+        asyncio.run(executor._check_auth())
+    assert "private-fixture-value" not in str(error.value)
+
+
+@pytest.mark.parametrize("mode,method,accepted", [
+    ("subscription", "claude.ai", True),
+    ("subscription", "oauth_token", True),
+    ("subscription", "api_key", False),
+    ("api_key", "api_key", True),
+    ("api_key", "api_key_helper", True),
+    ("provider_default", "third_party", True),
+    ("provider_default", "none", False),
+])
+def test_claude_auth_status_checked_without_exposing_identity(tmp_path, monkeypatch, mode, method, accepted):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    executor = ClaudeExecutor(cli_auth_mode=mode)
+    executor.configure_runtime(root=tmp_path)
+    captures = []
+
+    async def spawn(*command, **options):
+        captures.append(command)
+        stdout = asyncio.StreamReader()
+        stdout.feed_data(json.dumps({"loggedIn": True, "authMethod": method,
+                                     "email": "private@example.invalid"}).encode())
+        stdout.feed_eof()
+        async def wait():
+            return 0
+        return SimpleNamespace(stdout=stdout, wait=wait, returncode=0)
+
+    async def stop(process):
+        await process.wait()
+
+    monkeypatch.setattr("dennice.executors.claude.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("dennice.executors.claude.stop_process", stop)
+    if accepted:
+        expected_method = {
+            "claude.ai": "subscription", "oauth_token": "subscription",
+            "api_key": "api_key", "api_key_helper": "api_key",
+        }.get(method, "other")
+        assert asyncio.run(executor._check_auth()) == expected_method
+    else:
+        with pytest.raises(RuntimeError) as error:
+            asyncio.run(executor._check_auth())
+        assert "private@example.invalid" not in str(error.value)
+    assert captures == [("claude", "auth", "status")]
 
 
 def test_native_resume_tools_usage_and_updated_pa(tmp_path, monkeypatch):
@@ -145,6 +232,27 @@ def test_usage_missing_is_unknown_and_regression_rejected():
         ClaudeExecutor._usage(successful_events()[-1], previous, "attempt")
 
 
+def test_claude_missing_token_usage_cannot_claim_budgeted_turn_complete(tmp_path, monkeypatch):
+    events = successful_events()
+    for key in ("usage", "modelUsage", "total_cost_usd"):
+        events[-1].pop(key)
+    captures = []
+    mock_process(monkeypatch, events, captures)
+    executor = configured(tmp_path)
+
+    async def run():
+        observed = []
+        with pytest.raises(RuntimeError, match="without input/output token telemetry.*could not be enforced"):
+            async for event in executor.execute("run-no-usage", request()):
+                observed.append(event)
+        usage = next(event for event in observed if event.kind == EventKind.USAGE)
+        assert usage.payload["reported"] is False
+        assert usage.payload["input_tokens"] is None
+        assert usage.payload["output_tokens"] is None
+
+    asyncio.run(run())
+
+
 def test_native_profile_does_not_widen_shell_or_mcp_authority(tmp_path):
     executor = configured(tmp_path)
     command = executor.command_for(request())
@@ -153,3 +261,13 @@ def test_native_profile_does_not_widen_shell_or_mcp_authority(tmp_path):
     assert "--restricted" in command
     assert "--dangerously-skip-permissions" not in command
     assert "--permission-prompt-tool" not in command
+
+
+def test_live_claude_connection_check_disables_all_builtin_tools(tmp_path):
+    executor = configured(tmp_path)
+    executor.configure_runtime(root=tmp_path, connection_check=True)
+    command = executor.command_for(request())
+    assert command[command.index("--tools") + 1] == ""
+    assert "--allowedTools" not in command
+    assert "--restricted" in command
+    assert command[command.index("--permission-mode") + 1] != "bypassPermissions"

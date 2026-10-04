@@ -71,16 +71,27 @@ class AppServerClient:
                     if future and not future.done():
                         if "error" in message:
                             # Provider diagnostics can contain user data. Keep
-                            # the code and bounded message, never stderr/tokens.
+                            # only a numeric code, never raw message/stderr.
                             error = message["error"]
+                            code = error.get("code") if isinstance(error, dict) else None
                             future.set_exception(RuntimeError(
-                                f"Codex protocol error {error.get('code')}: {str(error.get('message', 'request failed'))[:1000]}"
+                                f"Codex protocol error {code if type(code) is int else 'unknown'}"
                             ))
                         else:
                             future.set_result(message.get("result", {}))
                 else:
                     self.events.put_nowait(message)
-            self.failure = RuntimeError("Codex app-server closed before the operation completed")
+            # A child can close stdout just before its exit status becomes
+            # observable. Do not include stderr: provider diagnostics may
+            # contain user content or credentials.
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self.process.wait(), 0.2)
+            status = (f" with exit status {self.process.returncode}"
+                      if self.process.returncode is not None else "")
+            self.failure = RuntimeError(
+                "Codex app-server closed" + status +
+                " before the operation completed; check the installed CLI and local permissions"
+            )
         except asyncio.CancelledError:
             raise
         except Exception as error:

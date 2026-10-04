@@ -20,7 +20,8 @@ def router_from_config(
         # ``v1`` belongs to the deterministic rule router. Older UI saves could
         # retain it when a user switched providers, but it is not a Codex model.
         model = "default" if config.model in {"", "v1"} else config.model
-        return CodexRouter(model=model, reasoning_effort=config.reasoning_effort)
+        return CodexRouter(model=model, reasoning_effort=config.reasoning_effort,
+                           cli_auth_mode=config.codex_cli_auth or "chatgpt")
     if config.provider == "jev":
         if jev is None:
             raise ValueError("Jev requires DenniceConfig.jev connection settings.")

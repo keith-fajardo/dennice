@@ -83,6 +83,39 @@ def test_cancellation_is_recorded_and_closes_executor(tmp_path):
     asyncio.run(check())
 
 
+def test_timeout_is_recorded_preserves_partial_output_and_closes_executor(tmp_path):
+    class Executor:
+        id, version = "test", "v1"
+
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.closed = False
+
+        async def execute(self, run_id, request):
+            try:
+                self.started.set()
+                yield RunEvent(run_id=run_id, kind=EventKind.MODEL_STREAM,
+                               payload={"text": "partial"})
+                await asyncio.Event().wait()
+            finally:
+                self.closed = True
+
+    async def check():
+        config = DenniceConfig(runs={"path": str(tmp_path)})
+        config.budgets.max_seconds = 0.5
+        executor = Executor()
+        harness = Harness(config, executor=executor)
+        trace = await harness.run("timeout me")
+        assert executor.started.is_set()
+        assert executor.closed
+        assert trace.status == "timed_out"
+        assert trace.result.output == "partial"
+        assert trace.events[-1].kind == EventKind.RUN_FAILED
+        assert trace.events[-1].payload["error"] == "Run time budget exhausted."
+
+    asyncio.run(check())
+
+
 def test_event_journal_rejects_rewrites_transactionally(tmp_path):
     async def check():
         store = LocalRunStore(tmp_path)
@@ -135,7 +168,7 @@ def test_executor_configuration_changes_apply_only_to_next_run(tmp_path):
         config.executor.provider = "not-a-provider"
         async for _ in stream:
             pass
-        assert harness._last_trace.status == "completed"
+        assert harness._last_trace.status == "unverified"
         with pytest.raises(ValueError):
             await harness.run("next run")
     asyncio.run(check())
@@ -153,4 +186,27 @@ def test_owned_process_can_be_stopped():
         )
         await stop_process(process)
         assert process.returncode is not None
+    asyncio.run(check())
+
+
+def test_command_timeout_stops_spawned_descendants(tmp_path):
+    import os
+    import sys
+    from dennice.core.tools import run_command
+    if os.name != "posix":
+        pytest.skip("POSIX process-group contract; Windows requires its own CI")
+
+    async def check():
+        sentinel = tmp_path / "descendant-survived"
+        child = "import pathlib,sys,time; time.sleep(.5); pathlib.Path(sys.argv[1]).write_text('alive')"
+        parent = (
+            "import subprocess,sys,time; "
+            "subprocess.Popen([sys.executable, '-c', " + repr(child) + ", sys.argv[1]]); "
+            "time.sleep(60)"
+        )
+        with pytest.raises(TimeoutError):
+            await run_command([sys.executable, "-c", parent, str(sentinel)], tmp_path, .1)
+        await asyncio.sleep(.6)
+        assert not sentinel.exists()
+
     asyncio.run(check())

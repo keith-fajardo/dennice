@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from pathlib import Path
 from typing import Any
 
@@ -30,25 +32,113 @@ class ClaudeExecutor:
     id = "claude"
     version = "cli-v2"
 
+    _SUBSCRIPTION_PROVIDER_OVERRIDES = (
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_PROFILE",
+        "ANTHROPIC_ORGANIZATION_ID",
+        "ANTHROPIC_FEDERATION_RULE_ID",
+        "ANTHROPIC_AWS_API_KEY",
+        "ANTHROPIC_AWS_BASE_URL",
+        "ANTHROPIC_BEDROCK_BASE_URL",
+        "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
+        "ANTHROPIC_VERTEX_BASE_URL",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "ANTHROPIC_FOUNDRY_API_KEY",
+        "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
+        "ANTHROPIC_FOUNDRY_BASE_URL",
+        "ANTHROPIC_FOUNDRY_RESOURCE",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "AWS_BEARER_TOKEN_BEDROCK",
+    )
+
     def __init__(
         self,
         model: str = "default",
         reasoning_effort: ReasoningEffort | None = None,
         permission_mode: PermissionMode | None = None,
         command: str = "claude",
+        cli_auth_mode: str = "subscription",
     ) -> None:
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.permission_mode = permission_mode or PermissionMode.PLAN
         self.command = command
+        if cli_auth_mode not in {"subscription", "api_key", "provider_default"}:
+            raise ValueError("Unsupported Claude CLI authentication expectation.")
+        self.cli_auth_mode = cli_auth_mode
+
+    async def _check_auth(self) -> str:
+        """Check the effective CLI auth method without recording its full status JSON."""
+        if self.cli_auth_mode == "subscription":
+            if os.environ.get("ANTHROPIC_API_KEY"):
+                raise RuntimeError(
+                    "Claude -p would use ANTHROPIC_API_KEY instead of your subscription. "
+                    "Unset it or explicitly configure executor.claude_cli_auth: api_key."
+                )
+            if os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+                raise RuntimeError(
+                    "Claude has an explicit ANTHROPIC_AUTH_TOKEN; subscription billing cannot be verified. "
+                    "Unset it or choose executor.claude_cli_auth: provider_default."
+                )
+            override = next((name for name in self._SUBSCRIPTION_PROVIDER_OVERRIDES
+                             if os.environ.get(name)), None)
+            if override:
+                raise RuntimeError(
+                    f"Claude has a provider/authentication override in {override}; subscription routing "
+                    "cannot be verified. Unset it or choose executor.claude_cli_auth: provider_default."
+                )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command_for_platform([self.command, "auth", "status"]),
+                cwd=getattr(self, "root", str(Path.cwd())), stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL, **process_group_options(),
+            )
+        except FileNotFoundError:
+            raise RuntimeError("Claude Code CLI was not found. Install and sign in before running.") from None
+        try:
+            async with asyncio.timeout(8):
+                raw = await read_bounded(process.stdout, 8192)
+                code = await process.wait()
+        except TimeoutError:
+            raise RuntimeError("Claude authentication check timed out; no model call was made.") from None
+        finally:
+            await stop_process(process)
+        if code != 0:
+            raise RuntimeError("Claude authentication check failed; run `claude auth status` to inspect your login.")
+        try:
+            status = json.loads(raw)
+        except (ValueError, UnicodeError):
+            status = None
+        if not isinstance(status, dict) or status.get("loggedIn") is not True:
+            raise RuntimeError("Claude Code is not signed in; no model call was made.")
+        reported_method = status.get("authMethod")
+        if not isinstance(reported_method, str) or reported_method in {"", "none"}:
+            raise RuntimeError("Claude authentication method is unavailable; sign in before running.")
+        methods = {
+            "claude.ai": "subscription",
+            "oauth_token": "subscription",
+            "api_key": "api_key",
+            "api_key_helper": "api_key",
+        }
+        method = methods.get(reported_method, "other")
+        expected = {"subscription": {"subscription"}, "api_key": {"api_key"}}.get(self.cli_auth_mode)
+        if expected and method not in expected:
+            raise RuntimeError(
+                f"Claude authentication is {method}, but executor.claude_cli_auth expects {self.cli_auth_mode}. "
+                "Choose the intended CLI authentication explicitly before running."
+            )
+        return method
 
     def configure_runtime(self, *, approve=None, emit=None, store_path=None, root=".",
-                          budgets=None, hooks=None, hook_configs=()):
+                          budgets=None, hooks=None, hook_configs=(), connection_check=False):
         self.approve, self.emit = approve, emit
         self.linkage = ProviderSessionStore(store_path) if store_path else None
         self.root = str(Path(root).resolve())
         self.budgets = budgets
         self.hooks, self.hook_configs = hooks, hook_configs
+        self.connection_check = connection_check
 
     def command_for(self, request: ExecutionRequest, native_session_id: str | None = None) -> list[str]:
         command = [
@@ -73,12 +163,16 @@ class ClaudeExecutor:
             command.extend(["--max-turns", str(budgets.max_model_calls)])
         # A headless run cannot display native approval prompts. Expose only
         # the explicitly selected file tools and deny every other prompt.
-        tools = "Read,Glob,Grep"
-        if self.permission_mode == PermissionMode.WORKSPACE_WRITE:
-            tools += ",Edit,Write"
+        command.extend(["--system-prompt-snapshot", "off"])
+        if getattr(self, "connection_check", False):
+            # Claude's CLI documents --tools "" as disabling built-in tools.
+            command.extend(["--tools", ""])
+        else:
+            tools = "Read,Glob,Grep"
+            if self.permission_mode == PermissionMode.WORKSPACE_WRITE:
+                tools += ",Edit,Write"
+            command.extend(["--tools", tools, "--allowedTools", "Read,Glob,Grep"])
         command.extend([
-            "--system-prompt-snapshot", "off",
-            "--tools", tools, "--allowedTools", "Read,Glob,Grep",
             "--disallowedTools", "mcp__*",
             "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             "--restricted",
@@ -119,12 +213,16 @@ class ClaudeExecutor:
     async def execute(self, run_id: str, request: ExecutionRequest) -> AsyncIterator[RunEvent]:
         # Each execution owns its bridge and token; no shared persistent host,
         # global settings writes, OAuth token handling or project hook loading.
+        auth_method = await self._check_auth()
+        yield RunEvent(run_id=run_id, kind=EventKind.PROVIDER_EVENT,
+                       payload={"provider": "claude", "event": "auth_checked", "auth_method": auth_method})
         needs_gate = (self.permission_mode == PermissionMode.WORKSPACE_WRITE or
                       any(hook.enabled and hook.event == "before_tool" for hook in getattr(self, "hook_configs", ())))
         if not needs_gate:
             self.native_gate = None
-            async for event in self._execute_native(run_id, request):
-                yield event
+            async with aclosing(self._execute_native(run_id, request)) as native:
+                async for event in native:
+                    yield event
             return
         async with NativeToolGate(
             getattr(self, "root", str(Path.cwd())), self.permission_mode,
@@ -134,8 +232,9 @@ class ClaudeExecutor:
         ) as gate:
             self.native_gate = gate
             try:
-                async for event in self._execute_native(run_id, request):
-                    yield event
+                async with aclosing(self._execute_native(run_id, request)) as native:
+                    async for event in native:
+                        yield event
             finally:
                 self.native_gate = None
 
@@ -239,7 +338,7 @@ class ClaudeExecutor:
                         "resumed": bool(native_session), "model": payload.get("model", self.model),
                     })
                 if kind == "assistant" and payload.get("error"):
-                    errors.append(str(payload["error"]))
+                    errors.append("Native provider reported an assistant error")
                 if kind == "assistant":
                     message = payload.get("message") or {}
                     message_id = message.get("id") or payload.get("uuid")
@@ -312,6 +411,12 @@ class ClaudeExecutor:
                         current_state.update(totals)
                     persist()
                     yield event(EventKind.USAGE, usage_payload)
+                    if budgets and any(type(usage_payload.get(key)) is not int
+                                       for key in ("input_tokens", "output_tokens")):
+                        raise RuntimeError(
+                            "Claude completed without input/output token telemetry; the per-run token "
+                            "budget could not be enforced. Inspect the native session before retrying."
+                        )
                     known_tokens = sum(usage_payload.get(key) or 0 for key in ("input_tokens", "output_tokens", "cached_input_tokens", "cache_creation_input_tokens"))
                     if budgets and known_tokens > budgets.max_total_tokens:
                         raise RuntimeError("Claude reported token budget exceeded; no further calls will be made.")
@@ -336,19 +441,21 @@ class ClaudeExecutor:
                     emitted_text = True
                     yield RunEvent(run_id=run_id, kind=EventKind.MODEL_STREAM, payload={"text": text})
             return_code = await process.wait()
-            stderr = (await stderr_task).decode(errors="replace").strip()
+            await stderr_task
         finally:
             await stop_process(process)
             stderr_task.cancel()
             await asyncio.gather(stderr_task, return_exceptions=True)
             persist()
         if return_code != 0:
-            raise RuntimeError(f"Claude Code exited with status {return_code}. {stderr}".strip())
+            raise RuntimeError(
+                f"Claude Code exited with status {return_code}. "
+                "Inspect the provider CLI locally; raw diagnostics are withheld from the run trace."
+            )
         if final is None:
             raise RuntimeError("Claude stream ended without a terminal result; completion is unverified.")
         if final.get("is_error") or final.get("subtype") != "success" or errors:
-            detail = "; ".join(errors + [str(value) for value in final.get("errors", [])])
-            raise RuntimeError(f"Claude execution failed ({final.get('subtype', 'unknown')}): {detail or 'inspect native provider trace'}. No automatic replay.")
+            raise RuntimeError("Claude execution failed; inspect the provider CLI locally. No automatic replay.")
         if final.get("terminal_reason") not in {None, "completed"}:
             raise RuntimeError(f"Claude turn did not complete: {final['terminal_reason']}. No automatic replay.")
         if final.get("permission_denials"):

@@ -1,0 +1,7 @@
+day,query_id,warehouse,query_tag,execution_seconds,rows_produced,credits_attributed_compute
+2026-09-30,q001,ANALYTICS_WH,dbt:fct_orders,71,1240000,4.2
+2026-09-30,q002,ANALYTICS_WH,dbt:fct_orders,69,1210000,4.1
+2026-09-30,q003,ANALYTICS_WH,dbt:dim_customers,18,82000,0.7
+2026-10-01,q101,ANALYTICS_WH,dbt:fct_orders,672,18300000,21.4
+2026-10-01,q102,ANALYTICS_WH,dbt:fct_orders,688,18800000,21.9
+2026-10-01,q103,ANALYTICS_WH,dbt:dim_customers,19,83000,0.7

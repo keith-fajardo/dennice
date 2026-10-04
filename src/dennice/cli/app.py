@@ -59,6 +59,13 @@ def init() -> None:
             .read_text(encoding="utf-8"),
             encoding="utf-8",
         )
+    from importlib.resources import files
+    builtin_fixtures = files("dennice.benchmark.builtin_tasks").joinpath("fixtures")
+    for resource in builtin_fixtures.iterdir():
+        if resource.name.endswith((".csv", ".json")):
+            target = Path("benchmarks/fixtures") / resource.name
+            if not target.exists():
+                target.write_bytes(resource.read_bytes())
     typer.echo("Initialized Dennice project configuration.")
 
 
@@ -87,9 +94,11 @@ def run(
     trace = asyncio.run(Harness.from_config().run(task))
     if json_output:
         _json(trace.model_dump(mode="json"))
-        return
-    typer.echo(f"Run {trace.run_id}\n")
-    typer.echo(trace.result.output if trace.result else trace.error or "No result")
+    else:
+        typer.echo(f"Run {trace.run_id} ({trace.status})\n")
+        typer.echo(_trace_result_text(trace))
+    if trace.status in {"failed", "timed_out", "cancelled", "interrupted"}:
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -101,10 +110,18 @@ def inspect(
     if json_output:
         _json(trace.model_dump(mode="json"))
         return
-    typer.echo(f"Run: {trace.run_id}\nTask: {trace.task.prompt}\n")
+    typer.echo(f"Run: {trace.run_id}\nStatus: {trace.status}\nTask: {trace.task.prompt}\n")
     if trace.routing:
         typer.echo(f"Task family: {trace.routing.task_family}\nPrimary: {trace.routing.primary_demand}")
-    typer.echo("\n" + (trace.result.output if trace.result else trace.error or "No result"))
+    typer.echo("\n" + _trace_result_text(trace))
+
+
+def _trace_result_text(trace) -> str:
+    output = trace.result.output if trace.result else ""
+    if trace.status in {"failed", "timed_out", "cancelled", "interrupted"}:
+        partial = f"Partial response (unverified):\n{output}\n\n" if output.strip() else ""
+        return partial + f"Run stopped ({trace.status}): {trace.error or 'No error detail recorded.'}"
+    return output or "No result"
 
 
 @benchmark_app.command("list")

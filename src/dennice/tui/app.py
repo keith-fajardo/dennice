@@ -39,6 +39,7 @@ from dennice.core.process import command_for_platform, process_group_options, re
 from dennice.core.skills import discover_skills
 from dennice.executors.api import API_DEFAULTS, API_PROVIDERS, load_api_models
 from dennice.core.verification import verify_executor, verify_router
+from dennice.core.accounting import summarize_usage
 from dennice.runs.sessions import ChatMessage, ChatSession, SessionStore
 from dennice.tui.transcript import Transcript
 from dennice.tui.files import DirectoryPicker, FileInput, FilePreviewPane, GitDiffPane, WorkspaceFiles
@@ -326,7 +327,7 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
     #setup-dialog Select { height: 1; min-height: 1; border: none; padding: 0 1; background: #292929; color: #e6e6e6; }
     #setup-buttons, #setup-api-buttons, #setup-router-buttons { height: 1; margin-top: 1; }
     #setup-buttons Button, #setup-api-buttons Button, #setup-router-buttons Button { width: 1fr; min-width: 0; margin-right: 1; }
-    #setup-model-label, #setup-effort-label, #setup-router-model-label, #setup-openjev-label, #setup-jev-label { color: #d8d8d8; margin-top: 1; }
+    #setup-model-label, #setup-effort-label, #setup-claude-auth-label, #setup-router-model-label, #setup-openjev-label, #setup-jev-label { color: #d8d8d8; margin-top: 1; }
     #setup-effort-buttons { height: 1; }
     #setup-effort-buttons Button { width: 1fr; min-width: 0; margin-right: 1; padding: 0; }
     #setup-permission-label { color: #d8d8d8; margin-top: 1; }
@@ -357,6 +358,7 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
     #setup-save { margin-top: 2; width: 26; }
     #setup-cancel { margin-top: 1; width: 26; }
     #setup-note { color: #8e8e8e; margin-top: 1; }
+    #setup-copilot-note { color: #d8c08a; margin: 1 0; }
     #setup-extensions { height: 1; margin-top: 2; }
     #setup-extensions Button { background: #375679; color: white; margin-right: 2; }
     """
@@ -372,6 +374,8 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
         self._api_model_options = {provider: EXECUTOR_MODELS[provider] for provider in API_PROVIDERS}
         self.api_base_url = config.executor.base_url or API_DEFAULTS.get(self.executor_provider, ("", ""))[0]
         self.api_key_env = config.executor.api_key_env
+        self.claude_cli_auth = config.executor.claude_cli_auth or "subscription"
+        self.codex_cli_auth = config.executor.codex_cli_auth or "chatgpt"
         if self.api_key_env is None:
             self.api_key_env = API_DEFAULTS.get(self.executor_provider, ("", ""))[1]
         self.reasoning_effort = (
@@ -382,6 +386,7 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
             config.router.provider if config.router.provider in {"rule", "codex", "jev", "openjev"} else "rule"
         )
         self.router_model = config.router.model
+        self.router_codex_cli_auth = config.router.codex_cli_auth or "chatgpt"
         self.jev_api_key_env = config.jev.api_key_env
         self.openjev_endpoint = config.openjev.endpoint
         self.openjev_model = config.openjev.model
@@ -411,6 +416,18 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
             yield Static("API key environment variable (name only; optional for local)", id="setup-api-key-label")
             yield Input(value=self.api_key_env, id="setup-api-key")
             yield Static("API/local tools are disabled by default; enable with /tools on. Permission controls govern native tools, not an OS sandbox. Shell commands and MCP require explicit approval. Selected skill manifests can be provided as user context. API calls may incur usage charges.", id="setup-api-note")
+            yield Static(
+                "Copilot CLI uses its stored account (or the `gh` fallback). Nonempty COPILOT_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN stops startup. GitHub may use individual-plan prompts and outputs for model improvement unless opted out in account settings; Dennice's local telemetry setting does not change that policy.",
+                id="setup-copilot-note",
+            )
+            yield Static("Claude Code CLI authentication (checked before each run)", id="setup-claude-auth-label")
+            yield Select((("Subscription", "subscription"), ("API key", "api_key"),
+                          ("Provider default / other", "provider_default")),
+                         value=self.claude_cli_auth, allow_blank=False, id="setup-claude-auth")
+            yield Static("Codex CLI authentication (checked before each run)", id="setup-codex-auth-label")
+            yield Select((("ChatGPT plan", "chatgpt"), ("API key", "api_key"),
+                          ("Provider default / other", "provider_default")),
+                         value=self.codex_cli_auth, allow_blank=False, id="setup-codex-auth")
             yield Static("Executor model", id="setup-model-label")
             yield Select(
                 self._model_options(),
@@ -432,7 +449,7 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
                 yield Button("Read only", id="permission-read-only", compact=True)
                 yield Button("Read-write", id="permission-workspace-write", compact=True)
                 yield Button("Plan", id="permission-plan", compact=True)
-            yield Button("Test executor", id="setup-test-executor", compact=True)
+            yield Button("Test executor (live)", id="setup-test-executor", compact=True)
             yield Static("", id="setup-executor-test-result")
             yield Static("System 1 cognitive router", id="setup-router")
             with Horizontal(id="setup-router-buttons"):
@@ -446,6 +463,10 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
                 placeholder="default",
                 id="setup-router-model",
             )
+            yield Static("Codex router authentication (checked before classification)", id="setup-router-codex-auth-label")
+            yield Select((("ChatGPT plan", "chatgpt"), ("API key", "api_key"),
+                          ("Provider default / other", "provider_default")),
+                         value=self.router_codex_cli_auth, allow_blank=False, id="setup-router-codex-auth")
             yield Static("Local OpenJev-compatible server", id="setup-openjev-label")
             yield Input(
                 value=self.openjev_endpoint,
@@ -587,8 +608,8 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
     def _show_selection(self) -> None:
         executor_labels = {
             "mock": "Choose an executor provider below",
-            "codex": "Codex CLI (uses the current ChatGPT/Codex login)",
-            "claude": "Claude Code (uses the current Claude subscription/login)",
+            "codex": "Codex CLI (checks selected CLI authentication before each run)",
+            "claude": "Claude Code (checks selected CLI authentication before each run)",
             "copilot": "GitHub Copilot CLI (uses the current GitHub Copilot subscription/login)",
             "openai-api": "OpenAI API (environment key; separate API billing)",
             "anthropic-api": "Anthropic API (environment key; separate API billing)",
@@ -597,12 +618,19 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
         label = executor_labels[self.executor_provider]
         self.query_one("#setup-provider", Static).update(f"System 2 executor: {label}")
         test_executor = self.query_one("#setup-test-executor", Button)
-        test_executor.label = f"Test executor · {self.executor_provider.title()}"
+        test_executor.label = f"Test executor (live) · {self.executor_provider.title()}"
         test_executor.display = self.executor_provider != "mock"
-        self.query_one("#setup-test-router", Button).label = f"Test router · {self.router_provider.title()}"
+        self.query_one("#setup-test-router", Button).label = (
+            f"Test router{' (live)' if self.router_provider != 'rule' else ''} · {self.router_provider.title()}"
+        )
         model_selected = self.executor_provider != "mock"
         for widget_id in ("#setup-api-url-label", "#setup-api-url", "#setup-api-key-label", "#setup-api-key", "#setup-api-note"):
             self.query_one(widget_id).display = self.executor_provider in API_PROVIDERS
+        for widget_id in ("#setup-claude-auth-label", "#setup-claude-auth"):
+            self.query_one(widget_id).display = self.executor_provider == "claude"
+        for widget_id in ("#setup-codex-auth-label", "#setup-codex-auth"):
+            self.query_one(widget_id).display = self.executor_provider == "codex"
+        self.query_one("#setup-copilot-note", Static).display = self.executor_provider == "copilot"
         for widget_id in ("#setup-model-label", "#setup-model-choice"):
             self.query_one(widget_id).display = model_selected
         model_choice = str(self.query_one("#setup-model-choice", Select).value)
@@ -620,7 +648,7 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
         effort_note = (
             "native Codex setting"
             if self.executor_provider == "codex"
-            else "Dennice prompt guidance; Claude Code has no standard CLI effort flag"
+            else "native Claude Code CLI setting with prompt guidance"
         )
         if self.executor_provider == "copilot":
             effort_note = "native Copilot CLI setting"
@@ -656,6 +684,8 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
         }
         self.query_one("#setup-router", Static).update(f"System 1 router: {router_labels[self.router_provider]}")
         for widget_id in ("#setup-router-model-label", "#setup-router-model"):
+            self.query_one(widget_id).display = self.router_provider == "codex"
+        for widget_id in ("#setup-router-codex-auth-label", "#setup-router-codex-auth"):
             self.query_one(widget_id).display = self.router_provider == "codex"
         for widget_id in (
             "#setup-openjev-label",
@@ -768,8 +798,12 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
                 permission_mode=permission_mode,
                 base_url=self.query_one("#setup-api-url", Input).value.strip() if self.executor_provider in API_PROVIDERS else None,
                 api_key_env=self.query_one("#setup-api-key", Input).value.strip() if self.executor_provider in API_PROVIDERS else None,
+                claude_cli_auth=str(self.query_one("#setup-claude-auth", Select).value) if self.executor_provider == "claude" else None,
+                codex_cli_auth=str(self.query_one("#setup-codex-auth", Select).value) if self.executor_provider == "codex" else None,
             ),
-            router=ProviderConfig(provider=self.router_provider, model=router_model),
+            router=ProviderConfig(provider=self.router_provider, model=router_model,
+                                  codex_cli_auth=str(self.query_one("#setup-router-codex-auth", Select).value)
+                                  if self.router_provider == "codex" else None),
             permission_mode=permission_mode,
             jev_api_key_env=env_name,
             openjev_endpoint=endpoint,
@@ -813,7 +847,8 @@ class SetupScreen(ModalScreen[SetupSelection | None]):
             self._connection_tests.pop(component, None)
             button.disabled = False
             current_provider = getattr(self, f"{component}_provider")
-            button.label = f"Test {component} · {current_provider.title()}"
+            live = component == "executor" or (component == "router" and current_provider != "rule")
+            button.label = f"Test {component}{' (live)' if live else ''} · {current_provider.title()}"
 
     def _animate_connection_tests(self) -> None:
         if not self._connection_tests:
@@ -1359,8 +1394,8 @@ class DenniceApp(App[None]):
     #details { display: none; width: 38; height: 1fr; }
     #workspace-task { height: 5; margin: 1 2; border: tall $accent; }
     #agent { width: 1fr; height: 1fr; }
-    #run-status { height: 1; margin: 0 2; }
-    #copy-response { height: 1; margin: 0 2; }
+    #run-status { height: 1; margin: 0 4; }
+    #copy-response { height: 1; margin: 0 4; }
     #output {
         height: auto;
         margin: 1 2;
@@ -1462,8 +1497,8 @@ class DenniceApp(App[None]):
                         yield Transcript("", id="output")
                     yield FilePreviewPane(id="session-file-preview")
                     yield GitDiffPane(id="session-git-diff")
-            yield Static("", id="run-status")
-            yield Button("Copy response · Ctrl+Shift+C", id="copy-response", compact=True)
+                    yield Static("", id="run-status")
+                    yield Button("Copy response · Ctrl+Shift+C", id="copy-response", compact=True)
             yield TaskComposer(
                 placeholder="Describe the next task…  Ctrl+Enter runs · ! command opens terminal mode",
                 id="workspace-task",
@@ -1930,7 +1965,14 @@ class DenniceApp(App[None]):
             self._show_local_message(f"Connecting to {name}…")
             try:
                 async with manager.connect([item], local_only=self.harness.config.privacy.local_only, root=root) as connections:
-                    self._show_local_message(f"Success: {name} connected; {len(connections.definitions())} approved tools. No tools invoked.")
+                    status = connections.status[-1]
+                    self._show_local_message(
+                        f"Success: {name} connected; "
+                        f"{status['approved_tools']} approved tools, "
+                        f"{status['approved_resources']} approved resources, and "
+                        f"{status['approved_prompts']} approved prompts discovered. "
+                        "No tools invoked and no resource or prompt content fetched."
+                    )
             except Exception as error:
                 self._show_local_message(f"Failed: {name}: {type(error).__name__}. Check server configuration; secrets are not displayed.")
         else:
@@ -2654,12 +2696,25 @@ class DenniceApp(App[None]):
         self._activity_frame = 0
         self._show_activity()
         events: list[str] = []
+        usage_events = []
         output = ""
         try:
             execution_harness = self._session_harness(session)
+            prior_goal_tokens = goal.tokens_used if goal else 0
+            session.last_run_tokens = prior_goal_tokens if prior_goal_tokens else None
+            session.last_run_budget_tokens = execution_harness.config.budgets.max_total_tokens
+            session.last_run_usage_complete = False
+            session.last_run_is_goal = goal is not None
+            session.last_route_provider = None
+            session.last_route_configured_model = None
+            session.last_route_effective_model = None
+            session.last_route_effective_effort = None
+            self._refresh_statusline()
             stream = self._goals.run_events(goal, execution_harness, initial_task=task) if goal else execution_harness.run_events(task)
             async for event in stream:
                 events.append(event.kind.value)
+                if event.kind in {EventKind.MODEL_CALL_STARTED, EventKind.USAGE}:
+                    usage_events.append(event)
                 visible = (
                     self._active_session_index is not None
                     and self._sessions[self._active_session_index].id == session.id
@@ -2671,8 +2726,14 @@ class DenniceApp(App[None]):
                 if event.kind == EventKind.GOAL_STATUS:
                     assistant_message.content = output + f"\n\nGoal {event.payload['status']}: {event.payload['detail']}"
                     self._show_transcript()
-                if visible and event.kind == EventKind.ROUTE_SELECTED:
-                    self.query_one("#events", Static).update("Tools / events\n" + json.dumps(event.payload, indent=2))
+                if event.kind == EventKind.ROUTE_SELECTED:
+                    session.last_route_provider = execution_harness.config.executor.provider
+                    session.last_route_configured_model = execution_harness.config.executor.model
+                    session.last_route_effective_model = str(event.payload["effective_model"])
+                    session.last_route_effective_effort = event.payload.get("effective_effort")
+                    if visible:
+                        self.query_one("#events", Static).update("Tools / events\n" + json.dumps(event.payload, indent=2))
+                        self._refresh_statusline()
                 if event.kind == EventKind.MODEL_STREAM:
                     output += str(event.payload["text"])
                     assistant_message.content = output
@@ -2680,6 +2741,15 @@ class DenniceApp(App[None]):
                     if visible:
                         self._refresh_statusline()
                 if event.kind == EventKind.USAGE:
+                    accounting = summarize_usage(usage_events)
+                    executor_rows = [row for row in accounting["records"] if row["phase"] == "executor"]
+                    known = [row["known_input_tokens"] + row["output_tokens"]
+                             for row in executor_rows
+                             if row.get("known_input_tokens") is not None and row["output_tokens"] is not None]
+                    session.last_run_tokens = prior_goal_tokens + sum(known) if known or prior_goal_tokens else None
+                    session.last_run_usage_complete = goal is None and bool(executor_rows) and all(
+                        row["input_tokens"] is not None and row["output_tokens"] is not None
+                        for row in executor_rows)
                     context_used = event.payload.get("context_tokens")
                     context_window = event.payload.get("context_window_tokens")
                     if type(context_used) is int and context_used >= 0:
@@ -2694,13 +2764,15 @@ class DenniceApp(App[None]):
                 if event.kind == EventKind.RUN_FAILED:
                     self._run_is_active = False
                     error = str(event.payload.get("error", "Unknown execution failure."))
-                    assistant_message.content = (
-                        "Execution failed\n\n"
-                        + error
-                        + "\n\nThe run trace was saved locally. Press Ctrl+D to inspect its event timeline."
-                    )
+                    partial = f"Partial response (unverified):\n\n{output.rstrip()}\n\n" if output.strip() else ""
+                    assistant_message.content = (partial + "Execution stopped\n\n" + error
+                        + "\n\nThe run trace was saved locally. Press Ctrl+D to inspect its event timeline.")
                     self._show_transcript()
                     self.notify(f"Execution failed in {session.title}; reopen it for details.", severity="error")
+                if visible and event.kind == EventKind.RUN_COMPLETED:
+                    label = ("Independent checks passed" if event.payload.get("verified") else
+                             "Response produced; no independent completion check configured")
+                    self.query_one("#events", Static).update(f"Run {event.run_id}\n{label}")
                 if event.kind == EventKind.TOOL_STARTED:
                     self._activity_detail = "Tool: " + str(event.payload.get("tool", "working"))
                 elif event.kind == EventKind.TOOL_COMPLETED:
@@ -2727,6 +2799,7 @@ class DenniceApp(App[None]):
             self._session_store.save(session)
             self._show_transcript()
             self._show_activity()
+            self._refresh_statusline()
 
     def _animate_activity(self) -> None:
         if not self._run_is_active and not self._running_session_id:
@@ -2838,21 +2911,48 @@ class DenniceApp(App[None]):
         permission = ("none (chat only)" if executor.provider in API_PROVIDERS and not self.harness.config.tools.enabled
                       else self._effective_permission_mode().value.replace("workspace-write", "read-write"))
         context = self._context_meter()
+        session = self._sessions[self._active_session_index] if self._active_session_index is not None else None
+        same_route = bool(session and session.last_route_provider == executor.provider and
+                          session.last_route_configured_model == executor.model and
+                          session.last_route_effective_model)
+        route_label = ""
+        if same_route:
+            routed_model = session.last_route_effective_model
+            routed_effort = session.last_route_effective_effort or "default"
+            if routed_model != executor.model or routed_effort != effort:
+                active = self._run_is_active and self._running_session_id == session.id
+                route_label = f"{'Run' if active else 'Last'} route: {routed_model}/{routed_effort}"
+        run_usage = ""
+        if session and session.last_run_budget_tokens is not None:
+            active = self._run_is_active and self._running_session_id == session.id
+            label = ("Goal" if active else "Last goal") if session.last_run_is_goal else ("Run" if active else "Last run")
+            if session.last_run_tokens is None:
+                state = "pending" if active else "unknown"
+                run_usage = f"{label} usage {state}/{session.last_run_budget_tokens:,}"
+            else:
+                qualifier = "" if session.last_run_usage_complete else "≥"
+                run_usage = f"{label} {qualifier}{session.last_run_tokens:,}/{session.last_run_budget_tokens:,} tokens"
         return (str(directory).replace(str(Path.home()), "~") + (f" · {branch}" if branch else "") +
-                f" · Model: {executor.provider}/{executor.model} · Effort: {effort} · Permissions: {permission} · {context} · {__version__}")
+                f" · Model: {executor.provider}/{executor.model} · Effort: {effort} · Permissions: {permission}"
+                + (f" · {route_label}" if route_label else "")
+                + (f" · {run_usage}" if run_usage else "") + f" · {context} · {__version__}")
 
     def _context_meter(self) -> str:
         session = self._ensure_active_session() if self._active_session_index is not None else None
         executor = self.harness.config.executor
+        same_route = bool(session and session.last_route_provider == executor.provider and
+                          session.last_route_configured_model == executor.model and
+                          session.last_route_effective_model)
+        context_model = session.last_route_effective_model if same_route else executor.model
         reported = bool(session and session.context_used_tokens is not None and
                         session.context_provider == executor.provider and
-                        (executor.model in {"", "default"} or session.context_model == executor.model))
+                        (same_route or executor.model in {"", "default"} or session.context_model == executor.model))
         if reported:
             used = session.context_used_tokens
             limit = session.context_window_tokens
-            if not limit and executor.model not in {"", "default"}:
+            if not limit and context_model not in {"", "default"}:
                 candidate = next((item for item in self.harness.config.routing.model_pool.get(executor.provider, [])
-                                  if item.enabled and item.model == executor.model), None)
+                                  if item.enabled and item.model == context_model), None)
                 if candidate:
                     limit = candidate.context_tokens
         else:
@@ -2867,9 +2967,9 @@ class DenniceApp(App[None]):
             # and image payloads are provider-specific and are not included.
             used = max(0, (len(payload) + len(prompt) + 3) // 4)
             limit = None
-            if session and executor.model not in {"", "default"}:
+            if session and context_model not in {"", "default"}:
                 candidate = next((item for item in self.harness.config.routing.model_pool.get(executor.provider, [])
-                                  if item.enabled and item.model == executor.model), None)
+                                  if item.enabled and item.model == context_model), None)
                 if candidate:
                     limit = candidate.context_tokens
         prefix = "Ctx " if reported else "Ctx ~"

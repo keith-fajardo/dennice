@@ -1,0 +1,5 @@
+day,warehouse,credits,average_running,peak_queued
+2026-09-30,ANALYTICS_WH,100,1.2,0
+2026-10-01,ANALYTICS_WH,138,2.1,3
+2026-09-30,INGEST_WH,44,0.9,0
+2026-10-01,INGEST_WH,44,0.9,0

@@ -2,7 +2,14 @@ import pytest
 from pydantic import ValidationError
 
 from dennice.cognition.taxonomy import CognitiveDemand
-from dennice.core.config import DenniceConfig, PermissionMode, ProviderConfig, ReasoningEffort
+from dennice.core.config import (
+    DenniceConfig,
+    ModelCandidate,
+    PermissionMode,
+    ProviderConfig,
+    ReasoningEffort,
+    RoutingConfig,
+)
 from dennice.core.models import CognitiveScore, ExecutionRequest, RoutingDecision, Task
 from dennice.executors.codex import CodexExecutor
 from dennice.executors.claude import ClaudeExecutor
@@ -15,6 +22,23 @@ from dennice.routing.factory import router_from_config
 def test_confidence_is_bounded() -> None:
     with pytest.raises(ValidationError):
         CognitiveScore(demand=CognitiveDemand.DECOMPOSITION, confidence=1.01)
+
+
+def test_routing_config_rejects_unknown_pool_and_duplicate_candidates() -> None:
+    with pytest.raises(ValidationError, match="Unknown executor provider"):
+        RoutingConfig(model_pool={"codxe": []})
+    candidate = ModelCandidate(model="gpt-example", tier="balanced")
+    with pytest.raises(ValidationError, match="Duplicate model IDs"):
+        RoutingConfig(model_pool={"codex": [candidate, candidate]})
+
+
+def test_routing_config_rejects_inverted_pa_thresholds_and_blank_model_ids() -> None:
+    with pytest.raises(ValidationError, match="supporting_threshold"):
+        RoutingConfig(primary_threshold=0.5, supporting_threshold=0.6)
+    with pytest.raises(ValidationError, match="must not be blank"):
+        ModelCandidate(model="   ", tier="balanced")
+    with pytest.raises(ValidationError):
+        RoutingConfig(primary_threshold=float("nan"))
 
 
 def test_primary_must_be_scored() -> None:

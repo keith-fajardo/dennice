@@ -36,6 +36,14 @@ class ChatSession:
     context_window_tokens: int | None = None
     context_provider: str | None = None
     context_model: str | None = None
+    last_run_tokens: int | None = None
+    last_run_budget_tokens: int | None = None
+    last_run_usage_complete: bool = False
+    last_run_is_goal: bool = False
+    last_route_provider: str | None = None
+    last_route_configured_model: str | None = None
+    last_route_effective_model: str | None = None
+    last_route_effective_effort: str | None = None
 
     @classmethod
     def new(cls, title: str, working_directory: str | None = None) -> ChatSession:

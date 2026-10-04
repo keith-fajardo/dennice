@@ -60,6 +60,85 @@ def test_auto_routing_never_falls_back_to_another_provider(tmp_path):
     assert settings.executor.provider == "local"
 
 
+def test_auto_routing_requires_the_selected_effort(tmp_path):
+    settings = config(tmp_path)
+    settings.routing.mode = "auto"
+    settings.routing.model_pinned = False
+    settings.routing.effort_pinned = False
+    settings.routing.model_pool["local"] = [
+        ModelCandidate(model="low-only", tier="strong", context_tokens=32000,
+                       efforts=["low"]),
+    ]
+    task = Task(prompt="Analyze a complex task")
+    assessment = TaskAssessment(complexity="complex", stakes="medium", uncertainty="low")
+    with pytest.raises(ValueError, match="No approved"):
+        select_route(settings, task, assessment)
+
+    settings.routing.model_pool["local"].append(
+        ModelCandidate(model="high-capable", tier="strong", context_tokens=32000,
+                       efforts=["high"])
+    )
+    selected, plan = select_route(settings, task, assessment)
+    assert selected.model == "high-capable"
+    assert selected.reasoning_effort.value == "high"
+    assert plan.applied and plan.effective_effort == "high"
+
+
+def test_auto_routing_requires_declared_tool_and_vision_capabilities(tmp_path):
+    settings = config(tmp_path)
+    settings.routing.mode = "auto"
+    settings.routing.model_pinned = False
+    settings.routing.effort_pinned = False
+    settings.routing.model_pool["local"] = [
+        ModelCandidate(model="capable", tier="balanced", context_tokens=32000,
+                       efforts=["medium"], tools=True, vision=True),
+    ]
+    task = Task(prompt="Inspect this screenshot and repository.", context={"images": ["image.png"]})
+    assessment = TaskAssessment(complexity="moderate", stakes="medium", uncertainty="low",
+                                requires_tools=True, requires_vision=True)
+    selected, plan = select_route(settings, task, assessment)
+    assert selected.model == "capable"
+    assert plan.applied
+
+    settings.routing.model_pool["local"][0].vision = False
+    with pytest.raises(ValueError, match="No approved"):
+        select_route(settings, task, assessment)
+
+    settings.routing.model_pool["local"][0].vision = True
+    settings.routing.model_pool["local"][0].tools = False
+    with pytest.raises(ValueError, match="No approved"):
+        select_route(settings, task, assessment)
+
+
+def test_auto_routing_accounts_for_composed_policy_size(tmp_path):
+    settings = config(tmp_path)
+    settings.routing.mode = "auto"
+    settings.routing.model_pinned = False
+    settings.routing.effort_pinned = False
+    settings.routing.model_pool["local"] = [
+        ModelCandidate(model="short-context", tier="strong", context_tokens=8192,
+                       efforts=["high"]),
+    ]
+    assessment = TaskAssessment(complexity="complex", stakes="medium", uncertainty="low")
+    with pytest.raises(ValueError, match="No approved"):
+        select_route(settings, Task(prompt="task"), assessment,
+                     system_instructions="policy " * 1000)
+
+
+def test_auto_routing_does_not_undercount_multibyte_context(tmp_path):
+    settings = config(tmp_path)
+    settings.routing.mode = "auto"
+    settings.routing.model_pinned = False
+    settings.routing.effort_pinned = False
+    settings.routing.model_pool["local"] = [
+        ModelCandidate(model="short-context", tier="strong", context_tokens=12000,
+                       efforts=["high"]),
+    ]
+    assessment = TaskAssessment(complexity="complex", stakes="medium", uncertainty="low")
+    with pytest.raises(ValueError, match="No approved"):
+        select_route(settings, Task(prompt="界" * 4000), assessment)
+
+
 def test_local_only_rejects_hook_processes(tmp_path):
     settings = config(tmp_path)
     settings.privacy.local_only = True
@@ -111,6 +190,31 @@ def test_untrusted_hook_never_spawns(monkeypatch, tmp_path):
     manager.trust(hook)
     assert fingerprint(hook.model_copy(update={"enabled": False})) in manager.trusted
     assert fingerprint(hook.model_copy(update={"command": ["changed"]})) not in manager.trusted
+
+
+def test_hook_spawn_failure_closes_audit_span(monkeypatch, tmp_path):
+    async def fail(*args, **kwargs):
+        raise FileNotFoundError("fixture-secret-path")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fail)
+    hook = HookConfig(name="fixture", event="before_route", command=["missing"], enabled=True)
+    manager = HookManager()
+    manager.trust(hook, root=tmp_path)
+    events = []
+
+    async def emit(kind, payload):
+        events.append((kind, payload))
+
+    async def journey():
+        with pytest.raises(FileNotFoundError):
+            await manager.dispatch([hook], "before_route", {}, str(tmp_path), emit=emit)
+
+    asyncio.run(journey())
+    assert [kind for kind, _ in events] == [EventKind.HOOK_STARTED, EventKind.HOOK_COMPLETED]
+    completion = events[-1][1]
+    assert completion["failure_category"] == "FileNotFoundError"
+    assert completion["outcome_known"] is False
+    assert "fixture-secret-path" not in str(completion)
 
 
 @pytest.mark.parametrize("provider", ["openai-api", "anthropic-api", "local"])
@@ -231,4 +335,39 @@ def test_anthropic_truncated_stream_never_completes(monkeypatch):
     async def collect():
         return [event async for event in stream_request(ProviderConfig(provider="anthropic-api", model="fixture"), "/messages", {})]
     with pytest.raises(RuntimeError, match="incompletely"):
+        asyncio.run(collect())
+
+
+@pytest.mark.parametrize("provider,payload", [
+    ("openai-api", {"status": "incomplete", "output": [{"content": [{"type": "output_text", "text": "partial"}]}]}),
+    ("anthropic-api", {"stop_reason": "max_tokens", "content": [{"type": "text", "text": "partial"}]}),
+    ("local", {"choices": [{"finish_reason": "length", "message": {"content": "partial"}}]}),
+])
+def test_json_fallback_rejects_partial_response_with_text(monkeypatch, provider, payload):
+    import httpx
+    original_client = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
+    monkeypatch.setattr("dennice.executors.api.connection", lambda config: ("https://fixture.invalid", {}))
+    monkeypatch.setattr("dennice.executors.api.httpx.AsyncClient", lambda **kwargs: original_client(transport=transport, **kwargs))
+
+    async def collect():
+        return [event async for event in stream_request(ProviderConfig(provider=provider, model="fixture"), "/response", {})]
+
+    with pytest.raises(RuntimeError, match="incomplete"):
+        asyncio.run(collect())
+
+
+def test_openai_completed_event_rejects_incomplete_response(monkeypatch):
+    import httpx
+    original_client = httpx.AsyncClient
+    payload = {"type": "response.completed", "response": {"status": "incomplete", "output": []}}
+    transport = httpx.MockTransport(lambda request: httpx.Response(200,
+        text="data: " + json.dumps(payload) + "\n\n", headers={"content-type": "text/event-stream"}))
+    monkeypatch.setattr("dennice.executors.api.connection", lambda config: ("https://fixture.invalid", {}))
+    monkeypatch.setattr("dennice.executors.api.httpx.AsyncClient", lambda **kwargs: original_client(transport=transport, **kwargs))
+
+    async def collect():
+        return [event async for event in stream_request(ProviderConfig(provider="openai-api", model="fixture"), "/responses", {})]
+
+    with pytest.raises(RuntimeError, match="incomplete"):
         asyncio.run(collect())

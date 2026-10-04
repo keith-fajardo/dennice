@@ -5,6 +5,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from dennice.core.attachments import task_images
+from dennice.core.codex_auth import check_codex_auth
 from dennice.core.config import PermissionMode
 from dennice.core.jsonrpc import AppServerClient
 from dennice.core.models import EventKind, RunEvent
@@ -15,6 +16,12 @@ from dennice.runs.provider_sessions import ProviderSessionStore
 
 class CodexAppServerExecutor(CodexExecutor):
     version = "app-server-v2"
+
+    def __init__(self, *args, cli_auth_mode="chatgpt", **kwargs):
+        super().__init__(*args, **kwargs)
+        if cli_auth_mode not in {"chatgpt", "api_key", "provider_default"}:
+            raise ValueError("Unknown Codex CLI authentication mode")
+        self.cli_auth_mode = cli_auth_mode
 
     def configure_runtime(self, *, approve=None, emit=None, store_path=None, root=".",
                           budgets=None, hooks=None, hook_configs=()):
@@ -40,6 +47,7 @@ class CodexAppServerExecutor(CodexExecutor):
         usage_previous = (state or {}).get("usage", {"inputTokens": 0, "outputTokens": 0})
         usage_tokens = 0
         usage_run = {"inputTokens": 0, "outputTokens": 0}
+        usage_reported = False
         output_bytes = 0
 
         async def journal(kind, payload):
@@ -50,6 +58,9 @@ class CodexAppServerExecutor(CodexExecutor):
 
         async with AppServerClient(self.command, cwd=cwd) as client:
             try:
+                auth_method = await check_codex_auth(client, self.cli_auth_mode)
+                yield RunEvent(run_id=run_id, kind=EventKind.PROVIDER_EVENT,
+                               payload={"provider": "codex", "event": "auth_checked", "auth_method": auth_method})
                 settings = {"cwd": cwd, "sandbox": self._sandbox_mode(),
                             "approvalPolicy": "on-request", "approvalsReviewer": "user",
                             "developerInstructions": request.system_instructions}
@@ -173,6 +184,7 @@ class CodexAppServerExecutor(CodexExecutor):
                         usage = payload.get("tokenUsage", {}).get("total", {})
                         keys = ("inputTokens", "outputTokens")
                         if all(type(usage.get(key)) is int and usage[key] >= 0 for key in keys):
+                            usage_reported = True
                             if any(usage[key] < usage_previous.get(key, 0) for key in keys):
                                 raise RuntimeError("Codex usage counters regressed; inspect the native thread before retrying")
                             delta = {key: usage[key] - usage_previous.get(key, 0) for key in keys}
@@ -195,23 +207,40 @@ class CodexAppServerExecutor(CodexExecutor):
                                 "context_window_tokens": context_window if type(context_window) is int and context_window > 0 else None,
                             })
                             if budgets and usage_tokens >= budgets.max_total_tokens:
-                                raise RuntimeError("Codex reported token budget exhausted")
+                                raise RuntimeError(
+                                    "Codex run token budget exhausted: "
+                                    f"{usage_tokens:,} reported tokens "
+                                    f"({usage_run['inputTokens']:,} input + {usage_run['outputTokens']:,} output) "
+                                    f"reached the {budgets.max_total_tokens:,}-token per-run limit. "
+                                    "The context meter shows only the latest model request, not cumulative run usage. "
+                                    "Partial output is saved in the run trace."
+                                )
                     elif method == "turn/completed":
                         turn = payload.get("turn", {})
                         if turn.get("id") != turn_id:
                             continue
                         if turn.get("status") != "completed":
-                            raise RuntimeError("Codex turn " + str(turn.get("status")) + ": " + str((turn.get("error") or {}).get("message", "stopped"))[:1000])
+                            status = turn.get("status")
+                            safe_status = (status if isinstance(status, str)
+                                           and status in {"failed", "interrupted", "cancelled"} else "stopped")
+                            raise RuntimeError(f"Codex turn {safe_status}; provider diagnostics are withheld from the run trace")
+                        if budgets and not usage_reported:
+                            raise RuntimeError(
+                                "Codex completed without token usage telemetry; the per-run token budget "
+                                "could not be enforced. Inspect the native session before retrying."
+                            )
                         state["status"] = "completed"
                         if linkage and session_id:
                             linkage.save(session_id, self.id, cwd, state)
                         return
                     elif method in {"warning", "configWarning", "model/rerouted"}:
-                        yield RunEvent(run_id=run_id, kind=EventKind.PROVIDER_EVENT, payload={"provider": "codex", "method": method, "detail": payload})
+                        yield RunEvent(run_id=run_id, kind=EventKind.PROVIDER_EVENT,
+                                       payload={"provider": "codex", "method": method,
+                                                "detail": "Provider event details withheld from the run trace"})
             finally:
                 if state and state.get("status") == "running" and linkage and session_id:
                     state["status"] = "interrupted"
                     linkage.save(session_id, self.id, cwd, state)
-                if thread_id and turn_id:
+                if thread_id and turn_id and state and state.get("status") != "completed":
                     with suppress(Exception):
                         await asyncio.wait_for(client.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, timeout=2), timeout=3)

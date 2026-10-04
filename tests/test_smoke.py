@@ -39,7 +39,8 @@ def test_offline_chat_session_restart_journey(tmp_path, monkeypatch):
             assert first.messages[-2].content == "hello"
             assert "offline executor" in first.messages[-1].content
             trace = app.harness._last_trace
-            assert trace.status == "completed"
+            assert trace.status == "unverified"
+            assert trace.verification["verified"] is False
             assert any(event.kind == EventKind.VERIFICATION_COMPLETED for event in trace.events)
             await submit(app, pilot, "/rename Smoke session")
             assert first.title == "Smoke session"

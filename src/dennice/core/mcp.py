@@ -27,6 +27,26 @@ def no_external_refs(value):
             no_external_refs(child)
 
 
+@asynccontextmanager
+async def _connection_stack():
+    """Keep the operation error if transport teardown also fails."""
+    operation_error = None
+    try:
+        async with AsyncExitStack() as stack:
+            try:
+                yield stack
+            except BaseException as exc:
+                operation_error = exc
+                raise
+        if operation_error is not None:
+            raise operation_error
+    except BaseException as cleanup_error:
+        if (operation_error is not None and cleanup_error is not operation_error
+                and isinstance(cleanup_error, Exception)):
+            raise operation_error from cleanup_error
+        raise
+
+
 class MCPManager:
     def __init__(self):
         self.trusted: set[str] = set()
@@ -45,7 +65,7 @@ class MCPManager:
 
     @asynccontextmanager
     async def connect(self, servers, *, local_only=False, root=None):
-        async with AsyncExitStack() as stack:
+        async with _connection_stack() as stack:
             connected = MCPConnections()
             for server in servers:
                 if not server.enabled:

@@ -2,6 +2,7 @@ import json
 
 from typer.testing import CliRunner
 
+from dennice.benchmark.dataset import BenchmarkDataset
 from dennice.cli.app import app
 
 
@@ -33,6 +34,10 @@ def test_init_creates_seed_benchmark(tmp_path, monkeypatch) -> None:
     result = CliRunner().invoke(app, ["init"])
     assert result.exit_code == 0, result.output
     assert (tmp_path / "benchmarks" / "tasks" / "snowflake_cost_001.yaml").exists()
+    for name in ("query_history.csv", "warehouse_history.csv", "run_results.json"):
+        assert (tmp_path / "benchmarks" / "fixtures" / name).is_file()
+    dataset = BenchmarkDataset.load(tmp_path / "benchmarks")
+    assert "q101" in dataset.evidence["snowflake_cost_001"]["query_history"]
 
 
 def test_benchmark_run_json(tmp_path, monkeypatch) -> None:

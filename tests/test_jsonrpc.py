@@ -34,7 +34,9 @@ def test_jsonrpc_frames_responses_events_errors_and_cleanup(monkeypatch):
     original = asyncio.create_subprocess_exec
     processes = []
     async def launch(*args, **kwargs):
-        assert args[-1] == "app-server"
+        if args and args[0] == "taskkill":
+            return await original(*args, **kwargs)
+        assert "app-server" in " ".join(args)
         process = await original(sys.executable, "-u", "-c", PROGRAM, **kwargs)
         processes.append(process)
         return process
@@ -55,6 +57,8 @@ def test_jsonrpc_frames_responses_events_errors_and_cleanup(monkeypatch):
 def test_jsonrpc_eof_and_malformed_stream_do_not_hang(monkeypatch, method):
     original = asyncio.create_subprocess_exec
     async def launch(*args, **kwargs):
+        if args and args[0] == "taskkill":
+            return await original(*args, **kwargs)
         return await original(sys.executable, "-u", "-c", PROGRAM, **kwargs)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
     async def journey():
@@ -63,4 +67,53 @@ def test_jsonrpc_eof_and_malformed_stream_do_not_hang(monkeypatch, method):
                 await asyncio.wait_for(client.request(method, {}), 2)
             with pytest.raises(RuntimeError):
                 await asyncio.wait_for(client.next_event(), 2)
+    asyncio.run(journey())
+
+
+def test_initialize_failure_reports_exit_status_without_stderr(monkeypatch):
+    original = asyncio.create_subprocess_exec
+
+    async def launch(*args, **kwargs):
+        if args and args[0] == "taskkill":
+            return await original(*args, **kwargs)
+        program = "import sys; sys.stderr.write('private fixture diagnostic\\n'); sys.exit(7)"
+        return await original(sys.executable, "-u", "-c", program, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+
+    async def journey():
+        with pytest.raises(RuntimeError, match="exit status 7") as error:
+            async with AppServerClient():
+                pass
+        assert "private fixture diagnostic" not in str(error.value)
+
+    asyncio.run(journey())
+
+
+def test_protocol_error_does_not_publish_raw_message(monkeypatch):
+    original = asyncio.create_subprocess_exec
+
+    async def launch(*args, **kwargs):
+        if args and args[0] == "taskkill":
+            return await original(*args, **kwargs)
+        program = """import json,sys
+for line in sys.stdin:
+    message=json.loads(line)
+    if message.get('method')=='initialized': continue
+    error={'id':message['id'],'error':{'code':42,'message':'private-fixture-token'}}
+    if message.get('method')=='initialize':
+        print(json.dumps({'id':message['id'],'result':{}}),flush=True)
+    else:
+        print(json.dumps(error),flush=True)
+"""
+        return await original(sys.executable, "-u", "-c", program, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+
+    async def journey():
+        async with AppServerClient() as client:
+            with pytest.raises(RuntimeError, match="protocol error 42") as error:
+                await client.request("turn/start", {})
+            assert "private-fixture-token" not in str(error.value)
+
     asyncio.run(journey())

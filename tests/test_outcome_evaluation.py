@@ -37,6 +37,14 @@ def test_report_independent_check_results_and_scoped_cost():
     assert not summarize_outcomes([row, row2])["paired_item_sets"]
 
 
+def test_pairing_detects_missing_repeat_even_when_item_sets_match():
+    base = {"item_id": "same", "arm": "routed", "verified_completion": None,
+            "critical_failure": None, "latency_seconds": None, "usage_known": False,
+            "executor_token_cost": None}
+    rows = [base, dict(base, arm="routed"), dict(base, arm="fixed")]
+    assert not summarize_outcomes(rows)["paired_item_sets"]
+
+
 def test_partial_or_cancelled_run_cannot_be_verified_complete():
     row = outcome_record(trace(status="cancelled", verification={"passed": True, "independent_checks": True}), arm="routed", item_id="x")
     assert row["verified_completion"] is False
