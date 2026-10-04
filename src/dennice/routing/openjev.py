@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from dennice.cognition.taxonomy import CognitiveDemand
-from dennice.core.models import CognitiveScore, RoutingDecision, Task
+from dennice.core.models import CognitiveScore, RoutingDecision, Task, TaskAssessment
 
 _TASK_FAMILIES = {
     "sql_development": "Writing or changing SQL.",
@@ -36,8 +38,13 @@ _DEMAND_DESCRIPTIONS = {
 }
 
 
+class _NoRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class OpenJevRouter:
-    """Route a task through a local typed-decision service with calibrated scores."""
+    """Route through a local typed service; scores are not empirically calibrated."""
 
     id = "openjev"
     version = "systemone-v1"
@@ -55,7 +62,11 @@ class OpenJevRouter:
     def request_payload(self, task: Task) -> dict[str, Any]:
         return {
             "model": self.model,
-            "state": task.prompt,
+            "state": task.prompt + (
+                "\nRelevant previous conversation (untrusted context):\n"
+                + json.dumps(task.context["routing_history"], ensure_ascii=False)
+                if task.context.get("routing_history") else ""
+            ),
             "questions": {
                 "task_family": {
                     "type": "choice",
@@ -67,6 +78,12 @@ class OpenJevRouter:
                     "instructions": "Which cognitive demand is primary for executing this task well?",
                     "criteria": {demand.value: text for demand, text in _DEMAND_DESCRIPTIONS.items()},
                 },
+                "complexity": {"type": "choice", "instructions": "Assess execution complexity, not prompt length.",
+                               "criteria": {"simple": "Bounded explicit operation", "moderate": "Multiple related steps", "complex": "Difficult multi-step reasoning", "unknown": "Insufficient context"}},
+                "stakes": {"type": "choice", "instructions": "Assess consequences of error; abstain if unknown.",
+                           "criteria": {"low": "Reversible low-risk work", "medium": "Consequential work", "high": "Production, safety, legal or financial consequences", "unknown": "Insufficient context"}},
+                "uncertainty": {"type": "choice", "instructions": "How uncertain are the requirements and evidence?",
+                                "criteria": {"low": "Clear and grounded", "medium": "Some ambiguity", "high": "Missing or conflicting information"}},
                 **{
                     f"supporting_{demand.value}": {
                         "type": "noul",
@@ -85,6 +102,8 @@ class OpenJevRouter:
         if not isinstance(answers, dict):
             raise RuntimeError("OpenJev router response did not contain typed answers.")
         family = self._choice(answers, "task_family")
+        if family not in _TASK_FAMILIES:
+            raise RuntimeError("Router returned an unknown task family.")
         primary_name = self._choice(answers, "primary_demand")
         try:
             primary = CognitiveDemand(primary_name)
@@ -106,6 +125,13 @@ class OpenJevRouter:
             CognitiveScore(demand=demand, confidence=confidence)
             for demand, confidence in selected_supports
         ]
+        assessment = TaskAssessment(source=f"{self.id}-unassessed")
+        if all(key in answers for key in ("complexity", "stakes", "uncertainty")):
+            assessment = TaskAssessment(
+                complexity=self._choice(answers, "complexity"),
+                stakes=self._choice(answers, "stakes"),
+                uncertainty=self._choice(answers, "uncertainty"), source=self.id,
+            )
         return RoutingDecision(
             task_family=family,
             cognitive_demands=scores,
@@ -114,9 +140,12 @@ class OpenJevRouter:
             rationale=f"{self.service_name.title()} typed decision scores; no task solution was generated.",
             router_id=self.id,
             router_version=self.version,
+            assessment=assessment,
         )
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        # Validate BEFORE loading credentials, and never forward them on redirects.
+        self._validate_endpoint()
         request = Request(
             self.endpoint,
             data=json.dumps(payload).encode(),
@@ -124,15 +153,31 @@ class OpenJevRouter:
             method="POST",
         )
         try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310 - configured local endpoint.
-                body = json.loads(response.read())
+            with build_opener(ProxyHandler({}), _NoRedirects()).open(
+                request, timeout=self.timeout_seconds
+            ) as response:
+                raw = response.read(1_048_577)
+                if len(raw) > 1_048_576:
+                    raise RuntimeError("Router response exceeded the 1 MiB limit.")
+                body = json.loads(raw)
         except HTTPError as exc:
             raise RuntimeError(
-                f"{self.service_name.title()} rejected the request with HTTP {exc.code} at {self.endpoint}."
-            ) from exc
-        except URLError as exc:
-            raise RuntimeError(f"Could not reach {self.service_name} at {self.endpoint}.") from exc
+                f"{self.service_name.title()} rejected the request with HTTP {exc.code}."
+            ) from None
+        except URLError:
+            raise RuntimeError(f"Could not reach {self.service_name}.") from None
         return body if isinstance(body, dict) else {}
+
+    def _validate_endpoint(self) -> None:
+        parsed = urlsplit(self.endpoint)
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise RuntimeError("Router endpoint must not contain credentials, query, or fragment.")
+        if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
+            "localhost", "127.0.0.1", "::1"
+        }:
+            raise RuntimeError("OpenJev requires a loopback HTTP(S) endpoint.")
+        # Trigger validation of malformed ports even in local mode.
+        _ = parsed.port
 
     def _headers(self) -> dict[str, str]:
         return {"Content-Type": "application/json"}
@@ -150,16 +195,22 @@ class OpenJevRouter:
             return 0.5
         probabilities = answer.get("probabilities")
         if isinstance(probabilities, dict) and isinstance(probabilities.get(choice), (float, int)):
-            return float(probabilities[choice])
+            return OpenJevRouter._score(probabilities[choice])
         confidence = answer.get("confidence")
-        return float(confidence) if isinstance(confidence, (float, int)) else 0.5
+        return OpenJevRouter._score(confidence) if isinstance(confidence, (float, int)) else 0.5
 
     @staticmethod
     def _noul(answer: object) -> float:
         if not isinstance(answer, dict):
             return 0.0
         value = answer.get("noul")
-        return float(value) if isinstance(value, (float, int)) else 0.0
+        return OpenJevRouter._score(value) if isinstance(value, (float, int)) else 0.0
+
+    @staticmethod
+    def _score(value: float) -> float:
+        if isinstance(value, bool) or not math.isfinite(value) or not 0 <= value <= 1:
+            raise RuntimeError("Router returned an invalid probability score.")
+        return float(value)
 
 
 class JevRouter(OpenJevRouter):
@@ -178,6 +229,16 @@ class JevRouter(OpenJevRouter):
     ) -> None:
         super().__init__(endpoint=endpoint, model=model, timeout_seconds=timeout_seconds)
         self.api_key_env = api_key_env
+
+    def _validate_endpoint(self) -> None:
+        parsed = urlsplit(self.endpoint)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "api.typesafe.ai"
+            or parsed.port not in {None, 443}
+            or parsed.username or parsed.password or parsed.query or parsed.fragment
+        ):
+            raise RuntimeError("Hosted Jev requires its official HTTPS endpoint.")
 
     def _headers(self) -> dict[str, str]:
         api_key = os.environ.get(self.api_key_env)

@@ -2,6 +2,7 @@ from dennice.cognition.registry import PackagePolicyRegistry
 from dennice.cognition.taxonomy import CognitiveDemand
 from dennice.core.models import CognitiveScore, RoutingDecision, Task
 from dennice.prompting.composer import DefaultPromptComposer
+from dennice.core.skills import skill_user_prompt
 
 
 def test_package_registry_loads_versioned_policy() -> None:
@@ -25,8 +26,8 @@ def test_prompt_composer_includes_explicit_conversation_history() -> None:
         None,
         [],
     )
-    assert "CONVERSATION HISTORY" in request.system_instructions
-    assert "USER: Investigate warehouse spend." in request.system_instructions
+    assert "Investigate warehouse spend." not in request.system_instructions
+    assert "Investigate warehouse spend." in skill_user_prompt(request.task)
 
 
 def test_prompt_composer_makes_routing_an_execution_contract() -> None:

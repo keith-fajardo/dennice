@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from dennice.core.config import DenniceConfig
-from dennice.core.models import ExecutionRequest, Task
+from dennice.core.config import DenniceConfig, PermissionMode
+from dennice.core.models import EventKind, ExecutionRequest, Task
 from dennice.executors.factory import executor_from_config
 from dennice.routing.factory import router_from_config
 
@@ -35,7 +35,7 @@ async def verify_router(config: DenniceConfig) -> ConnectionCheck:
 
 async def verify_executor(config: DenniceConfig) -> ConnectionCheck:
     """Validate System 2 with a minimal, non-writing request."""
-    executor = executor_from_config(config.executor)
+    executor = executor_from_config(config.executor.model_copy(update={"permission_mode": PermissionMode.READ_ONLY}))
     if config.executor.provider == "mock":
         return ConnectionCheck("System 2 executor", True, "Mock executor is local and ready.")
     request = ExecutionRequest(
@@ -45,10 +45,10 @@ async def verify_executor(config: DenniceConfig) -> ConnectionCheck:
     try:
         saw_output = False
         async for _event in executor.execute("connection_check", request):
-            saw_output = True
+            if _event.kind == EventKind.MODEL_STREAM and str(_event.payload.get("text", "")).strip():
+                saw_output = True
         if not saw_output:
             return ConnectionCheck("System 2 executor", False, "Provider completed without a response.")
     except Exception as error:  # The adapter's provider-specific diagnostic is useful to the user.
         return ConnectionCheck("System 2 executor", False, str(error))
     return ConnectionCheck("System 2 executor", True, f"{executor.id} responded in safe connection-check mode.")
-

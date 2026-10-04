@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from enum import Enum
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -27,11 +28,80 @@ class ProviderConfig(BaseModel):
     model: str
     reasoning_effort: ReasoningEffort | None = None
     permission_mode: PermissionMode | None = None
+    base_url: str | None = None
+    api_key_env: str | None = None
+
+
+class ModelCandidate(BaseModel):
+    model: str = Field(min_length=1)
+    tier: Literal["lightweight", "balanced", "strong"]
+    efforts: list[ReasoningEffort] = Field(default_factory=list)
+    vision: bool = False
+    tools: bool = False
+    context_tokens: int = Field(default=8192, gt=0)
+    enabled: bool = True
 
 
 class RoutingConfig(BaseModel):
     primary_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
     supporting_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
+    mode: Literal["fixed", "shadow", "auto"] = "fixed"
+    model_pinned: bool = True
+    effort_pinned: bool = True
+    model_pool: dict[str, list[ModelCandidate]] = Field(default_factory=dict)
+    pa_enabled: bool = True
+    max_supporting_policies: int = Field(default=2, ge=0, le=6)
+
+
+class PrivacyConfig(BaseModel):
+    local_only: bool = False
+    router_history: bool = False
+
+
+class BudgetConfig(BaseModel):
+    max_seconds: float = Field(default=300, gt=0, le=3600)
+    max_model_calls: int = Field(default=8, ge=1, le=100)
+    max_tool_calls: int = Field(default=24, ge=0, le=500)
+    max_output_tokens: int = Field(default=4096, ge=1, le=32768)
+    max_total_tokens: int = Field(default=100000, ge=1)
+
+
+class ToolsConfig(BaseModel):
+    enabled: bool = False
+    root: str = "."
+    output_limit: int = Field(default=24000, ge=100, le=100000)
+    timeout_seconds: float = Field(default=30, gt=0, le=120)
+
+
+class HookConfig(BaseModel):
+    name: str = Field(pattern=r"^[A-Za-z0-9_-]+$", max_length=32)
+    event: Literal["before_route", "after_route", "before_execution", "before_tool",
+                   "after_tool", "before_verification", "turn_complete"]
+    command: list[str] = Field(min_length=1)
+    enabled: bool = False
+    required: bool = True
+    timeout_seconds: float = Field(default=5, gt=0, le=30)
+    include_arguments: bool = False
+
+
+class MCPServerConfig(BaseModel):
+    name: str = Field(pattern=r"^[A-Za-z0-9_-]+$", max_length=32)
+    transport: Literal["stdio", "http"] = "stdio"
+    command: list[str] = Field(default_factory=list)
+    url: str | None = None
+    api_key_env: str | None = None
+    env: dict[str, str] = Field(default_factory=dict)
+    enabled: bool = False
+    approved_tools: list[str] = Field(default_factory=list)
+    approved_resources: list[str] = Field(default_factory=list)
+    approved_prompts: list[str] = Field(default_factory=list)
+    timeout_seconds: float = Field(default=15, gt=0, le=60)
+
+
+class VerificationConfig(BaseModel):
+    required_files: list[str] = Field(default_factory=list)
+    commands: list[list[str]] = Field(default_factory=list)
+    require_nonempty: bool = True
 
 
 class BenchmarkConfig(BaseModel):
@@ -79,6 +149,12 @@ class DenniceConfig(BaseModel):
     runs: RunsConfig = Field(default_factory=RunsConfig)
     jev: JevConfig = Field(default_factory=JevConfig)
     openjev: OpenJevConfig = Field(default_factory=OpenJevConfig)
+    privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
+    budgets: BudgetConfig = Field(default_factory=BudgetConfig)
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    hooks: list[HookConfig] = Field(default_factory=list)
+    mcp: list[MCPServerConfig] = Field(default_factory=list)
+    verification: VerificationConfig = Field(default_factory=VerificationConfig)
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> "DenniceConfig":

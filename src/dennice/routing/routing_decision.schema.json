@@ -54,13 +54,26 @@
         ]
       }
     },
-    "rationale": {"type": ["string", "null"]}
+    "rationale": {"type": ["string", "null"]},
+    "assessment": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "complexity": {"type": "string", "enum": ["simple", "moderate", "complex", "unknown"]},
+        "stakes": {"type": "string", "enum": ["low", "medium", "high", "unknown"]},
+        "uncertainty": {"type": "string", "enum": ["low", "medium", "high"]},
+        "requires_tools": {"type": "boolean"},
+        "requires_vision": {"type": "boolean"},
+        "source": {"type": "string"}
+      },
+      "required": ["complexity", "stakes", "uncertainty", "requires_tools", "requires_vision", "source"]
+    }
   },
   "required": [
     "task_family",
     "cognitive_demands",
     "primary_demand",
     "supporting_demands",
-    "rationale"
+    "rationale",
+    "assessment"
   ]
 }

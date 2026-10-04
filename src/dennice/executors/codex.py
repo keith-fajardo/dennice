@@ -9,7 +9,9 @@ from typing import Any
 
 from dennice.core.config import PermissionMode, ReasoningEffort
 from dennice.core.models import EventKind, ExecutionRequest, RunEvent
-from dennice.core.process import command_for_platform
+from dennice.core.process import command_for_platform, process_group_options, read_bounded, stop_process
+from dennice.core.skills import skill_user_prompt
+from dennice.core.attachments import task_images
 
 
 class CodexExecutor:
@@ -53,9 +55,12 @@ class CodexExecutor:
             command.extend(
                 ["--config", f'model_reasoning_effort="{self.reasoning_effort.value}"']
             )
-        command.append(
-            f"{request.system_instructions}\n\nUSER TASK\n{request.task.prompt}"
-        )
+        for path in task_images(request.task):
+            command.extend(["--image", path])
+        instructions = request.system_instructions
+        if self.permission_mode == PermissionMode.PLAN:
+            instructions += "\n\nPLANNING MODE: Investigate and produce a plan only. Do not implement changes."
+        command.append(f"{instructions}\n\nUSER TASK\n{skill_user_prompt(request.task)}")
         return command_for_platform(command)
 
     def _sandbox_mode(self) -> str:
@@ -69,6 +74,7 @@ class CodexExecutor:
                 *self.command_for(request),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **process_group_options(),
             )
         except FileNotFoundError as exc:
             raise RuntimeError(
@@ -78,23 +84,27 @@ class CodexExecutor:
         if process.stdout is None or process.stderr is None:  # Defensive for type checkers.
             raise RuntimeError("Could not capture Codex CLI output.")
 
-        stderr_task = asyncio.create_task(process.stderr.read())
+        stderr_task = asyncio.create_task(read_bounded(process.stderr))
         emitted_text = False
         errors: list[str] = []
-        while line := await process.stdout.readline():
-            payload = self._decode_event(line)
-            if payload is None:
-                continue
-            if payload.get("type") == "error":
-                errors.append(str(payload.get("message") or payload.get("error") or payload))
-                continue
-            text = self._event_text(payload)
-            if text:
-                emitted_text = True
-                yield RunEvent(run_id=run_id, kind=EventKind.MODEL_STREAM, payload={"text": text})
-
-        return_code = await process.wait()
-        stderr = (await stderr_task).decode(errors="replace").strip()
+        try:
+            while line := await process.stdout.readline():
+                payload = self._decode_event(line)
+                if payload is None:
+                    continue
+                if payload.get("type") == "error":
+                    errors.append(str(payload.get("message") or payload.get("error") or payload))
+                    continue
+                text = self._event_text(payload)
+                if text:
+                    emitted_text = True
+                    yield RunEvent(run_id=run_id, kind=EventKind.MODEL_STREAM, payload={"text": text})
+            return_code = await process.wait()
+            stderr = (await stderr_task).decode(errors="replace").strip()
+        finally:
+            await stop_process(process)
+            stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
         if return_code != 0:
             detail = "\n".join(errors + ([stderr] if stderr else []))
             raise RuntimeError(f"Codex CLI exited with status {return_code}. {detail}".strip())

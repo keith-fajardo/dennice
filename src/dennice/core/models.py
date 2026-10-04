@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -24,6 +24,27 @@ class CognitiveScore(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
+class TaskAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    complexity: Literal["simple", "moderate", "complex", "unknown"] = "unknown"
+    stakes: Literal["low", "medium", "high", "unknown"] = "unknown"
+    uncertainty: Literal["low", "medium", "high"] = "high"
+    requires_tools: bool = False
+    requires_vision: bool = False
+    source: str = "unassessed"
+
+
+class RoutePlan(BaseModel):
+    mode: str
+    recommended_model: str
+    effective_model: str
+    recommended_effort: str | None = None
+    effective_effort: str | None = None
+    reason: str
+    applied: bool = False
+    policy_version: str = "rules-v1"
+
+
 class RoutingDecision(BaseModel):
     task_family: str = Field(min_length=1)
     cognitive_demands: list[CognitiveScore] = Field(min_length=1)
@@ -32,6 +53,7 @@ class RoutingDecision(BaseModel):
     rationale: str | None = None
     router_id: str = "unknown"
     router_version: str = "unknown"
+    assessment: TaskAssessment | None = None
 
     @model_validator(mode="after")
     def validate_demand_membership(self) -> "RoutingDecision":
@@ -76,6 +98,22 @@ class EventKind(str, Enum):
     MODEL_STREAM = "model_stream"
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"
+    RUN_CANCELLED = "run_cancelled"
+    RUN_INTERRUPTED = "run_interrupted"
+    ROUTE_SELECTED = "route_selected"
+    HOOK_COMPLETED = "hook_completed"
+    HOOK_STARTED = "hook_started"
+    TOOL_STARTED = "tool_started"
+    TOOL_COMPLETED = "tool_completed"
+    APPROVAL_REQUESTED = "approval_requested"
+    APPROVAL_RESOLVED = "approval_resolved"
+    USAGE = "usage"
+    VERIFICATION_COMPLETED = "verification_completed"
+    GOAL_STATUS = "goal_status"
+    EFFECT_RECONCILED = "effect_reconciled"
+    PROVIDER_SESSION = "provider_session"
+    PROVIDER_EVENT = "provider_event"
+    MODEL_CALL_STARTED = "model_call_started"
 
 
 class RunEvent(BaseModel):
@@ -109,6 +147,11 @@ class RunTrace(BaseModel):
     events: list[RunEvent] = Field(default_factory=list)
     result: ExecutionResult | None = None
     error: str | None = None
+    status: str = "running"
+    route_plan: RoutePlan | None = None
+    verification: dict[str, Any] | None = None
+    recovery: dict[str, Any] | None = None
+    accounting: dict[str, Any] | None = None
 
 
 class RunSummary(BaseModel):

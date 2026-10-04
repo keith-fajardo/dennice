@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Dennice · dbt lineage preview</title>
+  <style>
+    html, body { margin: 0; min-height: 100%; }
+    body { background: #0b0b0c; padding: 18px; }
+    @media (max-width: 600px) { body { padding: 0; } }
+  </style>
+</head>
+<body>
+<div id="dennice-lineage-preview">
+  <style>
+    #dennice-lineage-preview {
+      --dl-bg: light-dark(#f5f4f2, #0b0b0c);
+      --dl-panel: light-dark(#ffffff, #141416);
+      --dl-panel-2: light-dark(#eeedeb, #1c1c1f);
+      --dl-border: light-dark(#d2d0cd, #343438);
+      --dl-text: light-dark(#28272a, #e8e7e9);
+      --dl-muted: light-dark(#77747a, #a5a3aa);
+      --dl-blue: light-dark(#315f9f, #86aef2);
+      --dl-pink: light-dark(#a52d72, #f17dbd);
+      --dl-green: light-dark(#28704b, #80cf9b);
+      color-scheme: light dark;
+      color: var(--dl-text);
+      background: var(--dl-bg);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.45;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    #dennice-lineage-preview * { box-sizing: border-box; }
+    #dennice-lineage-preview .window { border: 1px solid var(--dl-border); background: var(--dl-bg); min-height: 520px; }
+    #dennice-lineage-preview .topbar, #dennice-lineage-preview .statusbar { display:flex; align-items:center; gap:18px; padding:9px 14px; background:var(--dl-panel); }
+    #dennice-lineage-preview .topbar { border-bottom:1px solid var(--dl-border); flex-wrap:wrap; }
+    #dennice-lineage-preview .brand { font-weight:700; letter-spacing:.04em; }
+    #dennice-lineage-preview .crumb { color:var(--dl-muted); }
+    #dennice-lineage-preview .tabs { display:flex; gap:4px; margin-left:auto; }
+    #dennice-lineage-preview .tab { color:var(--dl-muted); padding:4px 10px; border-bottom:2px solid transparent; }
+    #dennice-lineage-preview .tab.active { color:var(--dl-pink); border-color:var(--dl-pink); }
+    #dennice-lineage-preview .workspace { display:grid; grid-template-columns:190px minmax(280px,1fr) 220px; min-height:438px; }
+    #dennice-lineage-preview .side { padding:13px 12px; background:var(--dl-panel); }
+    #dennice-lineage-preview .left { border-right:1px solid var(--dl-border); }
+    #dennice-lineage-preview .right { border-left:1px solid var(--dl-border); }
+    #dennice-lineage-preview .pane-title { color:var(--dl-muted); text-transform:uppercase; letter-spacing:.08em; font-size:11px; margin:0 0 12px; }
+    #dennice-lineage-preview .tree-row { padding:4px 5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--dl-muted); }
+    #dennice-lineage-preview .tree-row.selected { color:var(--dl-text); background:var(--dl-panel-2); border-left:2px solid var(--dl-pink); }
+    #dennice-lineage-preview .indent { padding-left:18px; }
+    #dennice-lineage-preview .graph-wrap { padding:13px; min-width:0; }
+    #dennice-lineage-preview .graph-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:0 0 10px; }
+    #dennice-lineage-preview .graph-head strong { font-size:13px; }
+    #dennice-lineage-preview .graph-head span { color:var(--dl-muted); font-size:11px; }
+    #dennice-lineage-preview .graph { position:relative; min-height:350px; border:1px solid var(--dl-border); background:var(--dl-panel); overflow:hidden; }
+    #dennice-lineage-preview .edges { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+    #dennice-lineage-preview .edges path { fill:none; stroke:var(--dl-border); stroke-width:1.5; }
+    #dennice-lineage-preview .node { position:absolute; width:150px; min-height:52px; text-align:left; border:1px solid var(--dl-border); background:var(--dl-panel-2); color:var(--dl-text); padding:7px 9px; font:inherit; cursor:pointer; }
+    #dennice-lineage-preview .node:hover, #dennice-lineage-preview .node:focus-visible { border-color:var(--dl-blue); outline:1px solid var(--dl-blue); }
+    #dennice-lineage-preview .node.active { border-color:var(--dl-pink); box-shadow:inset 3px 0 var(--dl-pink); }
+    #dennice-lineage-preview .node.source { border-left:3px solid var(--dl-green); }
+    #dennice-lineage-preview .node small { display:block; color:var(--dl-muted); font-size:10px; margin-top:3px; }
+    #dennice-lineage-preview .n1 { left:4%; top:42%; }
+    #dennice-lineage-preview .n2 { left:29%; top:42%; }
+    #dennice-lineage-preview .n3 { left:54%; top:42%; }
+    #dennice-lineage-preview .n4 { right:4%; top:42%; }
+    #dennice-lineage-preview .n5 { left:54%; top:13%; }
+    #dennice-lineage-preview .detail-name { overflow-wrap:anywhere; font-weight:700; color:var(--dl-pink); }
+    #dennice-lineage-preview .detail-type { color:var(--dl-muted); margin:4px 0 14px; }
+    #dennice-lineage-preview .detail-label { color:var(--dl-muted); font-size:10px; text-transform:uppercase; margin-top:12px; }
+    #dennice-lineage-preview .detail-value { overflow-wrap:anywhere; }
+    #dennice-lineage-preview .mini-action { margin-top:18px; border:1px solid var(--dl-border); padding:6px 8px; color:var(--dl-blue); display:inline-block; }
+    #dennice-lineage-preview .statusbar { border-top:1px solid var(--dl-border); color:var(--dl-muted); font-size:11px; flex-wrap:wrap; }
+    #dennice-lineage-preview .statusbar .branch { color:var(--dl-green); }
+    @media (max-width:760px) {
+      #dennice-lineage-preview .workspace { grid-template-columns:150px minmax(250px,1fr); }
+      #dennice-lineage-preview .right { grid-column:1 / -1; border-left:0; border-top:1px solid var(--dl-border); }
+      #dennice-lineage-preview .graph { overflow-x:auto; }
+      #dennice-lineage-preview .edges, #dennice-lineage-preview .node { min-width:600px; }
+    }
+  </style>
+  <div class="window" aria-label="Dennice dbt lineage interface mockup">
+    <header class="topbar">
+      <span class="brand">DENNICE</span>
+      <span class="crumb">~/analytics/dbt-finance</span>
+      <nav class="tabs" aria-label="Workspace views">
+        <span class="tab">Explorer</span><span class="tab">Git</span><span class="tab active">Lineage</span>
+      </nav>
+    </header>
+    <div class="workspace">
+      <aside class="side left">
+        <div class="pane-title">dbt project</div>
+        <div class="tree-row">▾ models</div>
+        <div class="tree-row indent">▾ staging</div>
+        <div class="tree-row indent">　stg_stripe__payments</div>
+        <div class="tree-row indent">▾ intermediate</div>
+        <div class="tree-row indent">　int_payments_daily</div>
+        <div class="tree-row indent selected">▾ marts</div>
+        <div class="tree-row indent selected">　fct_revenue</div>
+        <div class="tree-row">▾ seeds</div>
+        <div class="tree-row">▾ snapshots</div>
+      </aside>
+      <main class="graph-wrap">
+        <div class="graph-head"><strong>Model lineage</strong><span>5 nodes · 4 edges</span></div>
+        <div class="graph" role="img" aria-label="Lineage graph from Stripe payments through staging and intermediate models to the selected revenue fact table and dashboard">
+          <svg class="edges" viewBox="0 0 800 350" preserveAspectRatio="none" aria-hidden="true">
+            <path d="M145 175 H235"/><path d="M365 175 H435"/><path d="M565 175 H650"/><path d="M500 153 V85 H620 V153"/>
+          </svg>
+          <button class="node source n1" type="button" data-model="stripe.payments" data-type="source" data-materialized="External source" data-path="models/sources.yml">stripe.payments<small>source · Stripe</small></button>
+          <button class="node n2" type="button" data-model="stg_stripe__payments" data-type="view" data-materialized="View" data-path="models/staging/stripe/stg_stripe__payments.sql">stg_stripe__payments<small>model · staging</small></button>
+          <button class="node n3" type="button" data-model="int_payments_daily" data-type="table" data-materialized="Table" data-path="models/intermediate/int_payments_daily.sql">int_payments_daily<small>model · intermediate</small></button>
+          <button class="node active n4" type="button" data-model="fct_revenue" data-type="table" data-materialized="Table" data-path="models/marts/finance/fct_revenue.sql">fct_revenue<small>selected · mart</small></button>
+          <button class="node n5" type="button" data-model="revenue_dashboard" data-type="exposure" data-materialized="Dashboard" data-path="models/exposures.yml">revenue_dashboard<small>exposure · downstream</small></button>
+        </div>
+      </main>
+      <aside class="side right" aria-live="polite">
+        <div class="pane-title">Selected node</div>
+        <div class="detail-name" id="dl-model">fct_revenue</div>
+        <div class="detail-type" id="dl-type">model · table</div>
+        <div class="detail-label">Materialization</div><div class="detail-value" id="dl-materialized">Table</div>
+        <div class="detail-label">Project path</div><div class="detail-value" id="dl-path">models/marts/finance/fct_revenue.sql</div>
+        <div class="detail-label">Lineage</div><div class="detail-value">3 upstream · 1 downstream</div>
+        <div class="mini-action">Open model</div>
+      </aside>
+    </div>
+    <footer class="statusbar"><span>dbt project detected</span><span class="branch">Git: feature/revenue-mart</span><span>Manifest: target/manifest.json</span><span>↑ upstream　↓ downstream　Enter open　Esc back</span></footer>
+  </div>
+  <script>
+    (() => {
+      const root = document.getElementById('dennice-lineage-preview');
+      const nodes = root.querySelectorAll('.node');
+      nodes.forEach((node) => node.addEventListener('click', () => {
+        nodes.forEach((item) => item.classList.remove('active'));
+        node.classList.add('active');
+        root.querySelector('#dl-model').textContent = node.dataset.model;
+        root.querySelector('#dl-type').textContent = `${node.dataset.type} · ${node.dataset.materialized.toLowerCase()}`;
+        root.querySelector('#dl-materialized').textContent = node.dataset.materialized;
+        root.querySelector('#dl-path').textContent = node.dataset.path;
+      }));
+    })();
+  </script>
+</div>
+</body>
+</html>

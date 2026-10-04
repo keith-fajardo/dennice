@@ -1,7 +1,7 @@
 """Intentionally narrow, deterministic development router for the first vertical slice."""
 
 from dennice.cognition.taxonomy import CognitiveDemand
-from dennice.core.models import CognitiveScore, RoutingDecision, Task
+from dennice.core.models import CognitiveScore, RoutingDecision, Task, TaskAssessment
 
 
 class RuleRouter:
@@ -10,6 +10,11 @@ class RuleRouter:
 
     async def classify(self, task: Task) -> RoutingDecision:
         text = task.prompt.lower()
+        if text.strip() in {"hi", "hello", "hey", "thanks", "thank you"} and not task.context:
+            decision = self._decision("data_analysis", [("critical_inquiry", 0.5)])
+            return decision.model_copy(update={"assessment": TaskAssessment(
+                complexity="simple", stakes="low", uncertainty="low", source="rule-heuristic"
+            )})
         if any(word in text for word in ("snowflake", "credit", "cost", "warehouse")):
             if any(word in text for word in ("optimize", "reduce", "rewrite")):
                 return self._decision(
